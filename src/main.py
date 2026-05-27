@@ -19,6 +19,7 @@ Usage
   python main.py                              # all defaults
   python main.py --lr 1e-3 --num-layers 4    # override hyperparams
   python main.py --out-dir results/run_01    # redirect all outputs
+  python main.py --data-dir /path/to/data    # set data directory
   python main.py --help
 """
 
@@ -53,7 +54,7 @@ from evaluate import (
     compute_permutation_importance,
 )
 from loo import (
-    DATASETS,
+    get_datasets,
     optimal_threshold,
     run_lodo,
     plot_loo_results,
@@ -193,6 +194,8 @@ def main():
     torch.manual_seed(cfg.SEED)
     np.random.seed(cfg.SEED)
     print(f"\nDevice: {cfg.DEVICE}")
+
+    DATASETS = get_datasets()
 
     # ── 1. Load all 4 datasets ────────────────────────────────────────────────
     print("\n[1/7] Loading datasets …")
@@ -442,6 +445,9 @@ def _parse_cli() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train a Transformer encoder for per-base modification detection."
     )
+    p.add_argument("--data-dir",        type=str,   default=None, metavar="DIR",
+                   help=f"Directory containing control.tsv, 5mC.tsv, 5hmC.tsv, 6mA.tsv "
+                        f"(default: {cfg.DATA_DIR})")
     p.add_argument("--batch-size",      type=int,   default=None, metavar="N",
                    help=f"Mini-batch size (default: {cfg.BATCH_SIZE})")
     p.add_argument("--lr",              type=float, default=None, metavar="F",
@@ -477,6 +483,12 @@ def _parse_cli() -> argparse.Namespace:
 
 def _apply_cli_overrides(args: argparse.Namespace) -> None:
     """Push CLI arguments into the config module so all imports pick them up."""
+    if args.data_dir is not None:
+        cfg.DATA_DIR  = args.data_dir
+        cfg.TSV_UNMOD = os.path.join(args.data_dir, "control.tsv")
+        cfg.TSV_5MC   = os.path.join(args.data_dir, "5mC.tsv")
+        cfg.TSV_5HMC  = os.path.join(args.data_dir, "5hmC.tsv")
+        cfg.TSV_6MA   = os.path.join(args.data_dir, "6mA.tsv")
     if args.batch_size      is not None: cfg.BATCH_SIZE      = args.batch_size
     if args.lr              is not None: cfg.LR              = args.lr
     if args.weight_decay    is not None: cfg.WEIGHT_DECAY    = args.weight_decay

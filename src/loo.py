@@ -6,7 +6,7 @@ classifier.  Imported and called by main.py — not a standalone script.
 
 Public API
 ----------
-  DATASETS          — ordered list of (name, tsv_path, is_modified) tuples
+  get_datasets      — returns ordered list of (name, tsv_path, is_modified) tuples
   run_lodo          — train on 3 datasets, evaluate on the held-out one
   optimal_threshold — find the threshold that maximises F1
   plot_loo_results  — single-panel bar chart: main model + 4 LOO models
@@ -33,17 +33,22 @@ from torch.utils.data import DataLoader
 
 import config as cfg
 from dataset import ContigTileDataset, collate_fn
+from evaluate import plot_training_curves
 from features import build_feature_matrix
 from model import ModTransformer, count_parameters
 
 # ── Dataset registry ──────────────────────────────────────────────────────────
-# Imported by main.py so the same ordered list is used everywhere.
-DATASETS: list[tuple[str, str, bool]] = [
-    ("unmod", cfg.TSV_UNMOD, False),
-    ("5mC",   cfg.TSV_5MC,   True),
-    ("5hmC",  cfg.TSV_5HMC,  True),
-    ("6mA",   cfg.TSV_6MA,   True),
-]
+# Returned as a function so cfg.TSV_* are read at call time, after any CLI
+# overrides have been applied (module-level lists capture values at import time).
+
+def get_datasets() -> list[tuple[str, str, bool]]:
+    """Return the ordered list of (name, tsv_path, is_modified) tuples."""
+    return [
+        ("unmod", cfg.TSV_UNMOD, False),
+        ("5mC",   cfg.TSV_5MC,   True),
+        ("5hmC",  cfg.TSV_5HMC,  True),
+        ("6mA",   cfg.TSV_6MA,   True),
+    ]
 
 LOO_FIG_OUT     = "transformer_loo_results.png"
 LOO_METRICS_OUT = "transformer_loo_metrics.tsv"
@@ -214,6 +219,7 @@ def run_lodo(
           f"|  pos_weight={pos_weight.item():.2f}")
 
     best_auprc, best_epoch, patience_count, best_state = -1.0, 1, 0, None
+    train_losses, val_losses, val_auprcs = [], [], []
 
     for epoch in range(1, cfg.NUM_EPOCHS + 1):
         tr_loss, _, _    = _run_epoch(model, train_loader, criterion, optimizer)
@@ -221,6 +227,9 @@ def run_lodo(
         scheduler.step()
 
         val_auprc = average_precision_score(vt, vp) if vt.sum() > 0 else float(np.mean(1 - vp))
+        train_losses.append(tr_loss)
+        val_losses.append(val_loss)
+        val_auprcs.append(val_auprc)
 
         print(f"    Epoch {epoch:3d}/{cfg.NUM_EPOCHS}  "
               f"train_loss={tr_loss:.5f}  val_loss={val_loss:.5f}  "
@@ -240,6 +249,11 @@ def run_lodo(
     model.load_state_dict(best_state)
     model.to(cfg.DEVICE)
     print(f"  Best AUPRC={best_auprc:.4f} at epoch {best_epoch}")
+
+    plot_training_curves(
+        train_losses, val_losses, val_auprcs, best_epoch,
+        out_path=f"transformer_loo_training_curves_{held_out_name}.png",
+    )
 
     _, y_true, y_prob = _run_epoch(model, test_loader, criterion, None)
     m = _compute_metrics(y_true, y_prob)

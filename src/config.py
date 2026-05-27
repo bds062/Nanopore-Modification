@@ -8,14 +8,17 @@ Transformer modification classifier.
 import torch
 
 # ── Input paths ───────────────────────────────────────────────────────────────
+DATA_DIR  = "data"                              # override with --data-dir
+TSV_UNMOD = f"{DATA_DIR}/control.tsv"
+TSV_5MC   = f"{DATA_DIR}/5mC.tsv"
+TSV_5HMC  = f"{DATA_DIR}/5hmC.tsv"
+TSV_6MA   = f"{DATA_DIR}/6mA.tsv"
+
+#Old paths:
 # TSV_UNMOD = "/fs/nexus-scratch/bds062/results/event_clustering_control/pred_mods.tsv"
-# TSV_5MC   = "/fs/nexus-scratch/bds062/results/event_clustering_5mC/pred_mods.tsv"
-# TSV_5HMC  = "/fs/nexus-scratch/bds062/results/event_clustering_5hmC/pred_mods.tsv"
-# TSV_6MA   = "/fs/nexus-scratch/bds062/results/event_clustering_6mA/pred_mods.tsv"
-TSV_UNMOD = "/fs/nexus-scratch/bds062/results/transformer2/data/control.tsv"
-TSV_5MC   = "/fs/nexus-scratch/bds062/results/transformer2/data/5mC.tsv"
-TSV_5HMC  = "/fs/nexus-scratch/bds062/results/transformer2/data/5hmC.tsv"
-TSV_6MA   = "/fs/nexus-scratch/bds062/results/transformer2/data/6mA.tsv"
+# TSV_5MC = "/fs/nexus-scratch/bds062/results/event_clustering_5mC/pred_mods.tsv"
+# TSV_5HMC = "/fs/nexus-scratch/bds062/results/event_clustering_5hmC/pred_mods.tsv"
+# TSV_6MA = "/fs/nexus-scratch/bds062/results/event_clustering_6mA/pred_mods.tsv"
 
 # ── Output paths ──────────────────────────────────────────────────────────────
 MODEL_OUT      = "transformer_mod_classifier.pt"
