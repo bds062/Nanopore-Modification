@@ -26,6 +26,7 @@ Usage
 import math
 import os
 import argparse
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -60,6 +61,24 @@ from loo import (
     plot_loo_results,
     save_loo_metrics_tsv,
 )
+
+
+# ── Logging helper ─────────────────────────────────────────────────────────────
+
+def _log(msg: str = "", indent: int = 0) -> None:
+    """Print *msg* prefixed with a UTC ISO-8601 timestamp.
+
+    Parameters
+    ----------
+    msg    : Text to display.  An empty string emits a blank timestamped line.
+    indent : Number of additional leading spaces (applied after the prefix).
+    """
+    ts     = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    prefix = f"[{ts}]"
+    pad    = " " * indent
+    # Preserve multi-line messages by stamping every line.
+    for line in msg.split("\n"):
+        print(f"{prefix}{pad} {line}" if line.strip() else f"{prefix}")
 
 
 # ── One epoch of training or evaluation ───────────────────────────────────────
@@ -193,28 +212,41 @@ def _main_model_metrics_by_dataset(
 def main():
     torch.manual_seed(cfg.SEED)
     np.random.seed(cfg.SEED)
-    print(f"\nDevice: {cfg.DEVICE}")
+
+    t_start = datetime.now(timezone.utc)
+    _log("=" * 68)
+    _log("  Transformer Modification Classifier  —  Training Pipeline")
+    _log(f"  Run started  : {t_start.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    _log(f"  Random seed  : {cfg.SEED}")
+    _log(f"  Compute device : {cfg.DEVICE}")
+    _log("=" * 68)
 
     DATASETS = get_datasets()
 
     # ── 1. Load all 4 datasets ────────────────────────────────────────────────
-    print("\n[1/7] Loading datasets …")
+    _log()
+    _log("[Stage 1/7]  Loading input datasets …")
     all_frames: dict[str, pd.DataFrame] = {}
     for name, path, is_mod in DATASETS:
+        _log(f"  Reading  '{name}'  ←  {path}", indent=2)
         all_frames[name] = load_and_label(path, is_mod, name)
 
     df    = pd.concat(list(all_frames.values()), ignore_index=True)
     total = len(df)
     n_mod = int(df["label"].sum())
-    print(f"\n  Pooled total: {total:,} positions")
-    print(f"  Unmodified  : {total - n_mod:,}  ({100*(total - n_mod)/total:.1f}%)")
-    print(f"  Modified    : {n_mod:,}          ({100*n_mod/total:.1f}%)")
+    _log()
+    _log("  Dataset composition after pooling:", indent=2)
+    _log(f"    Total positions  : {total:>12,}", indent=2)
+    _log(f"    Unmodified       : {total - n_mod:>12,}  ({100*(total - n_mod)/total:.1f} %)", indent=2)
+    _log(f"    Modified         : {n_mod:>12,}  ({100*n_mod/total:.1f} %)", indent=2)
 
     # ── 2. Build feature matrix ────────────────────────────────────────────────
-    print("\n[2/7] Building feature matrix …")
+    _log()
+    _log("[Stage 2/7]  Constructing feature matrix …")
     X_df      = build_feature_matrix(df)
     feat_cols = list(X_df.columns)
-    print(f"  Feature columns ({len(feat_cols)}): {feat_cols}")
+    _log(f"  Feature dimensionality : {len(feat_cols)}", indent=2)
+    _log(f"  Feature columns        : {feat_cols}", indent=2)
 
     X        = X_df.values.astype(np.float32)
     y        = df["label"].values.astype(np.float32)
@@ -223,7 +255,9 @@ def main():
     ref_name = df["ref_name"].values
 
     # ── 3. Contig-level train / test split ────────────────────────────────────
-    print("\n[3/7] Splitting by contig (test_size={:.0%}) …".format(cfg.TEST_SIZE))
+    _log()
+    _log(f"[Stage 3/7]  Partitioning data by contig  "
+         f"(test fraction = {cfg.TEST_SIZE:.0%}) …")
     splitter = GroupShuffleSplit(n_splits=1, test_size=cfg.TEST_SIZE, random_state=cfg.SEED)
     train_idx, test_idx = next(splitter.split(X, y, groups=groups))
 
@@ -238,19 +272,22 @@ def main():
     X_train   = (X_train - feat_mean) / feat_std
     X_test    = (X_test  - feat_mean) / feat_std
 
-    print(f"  Train: {len(X_train):,} positions ({len(np.unique(grp_train))} contigs)")
-    print(f"  Test : {len(X_test):,} positions ({len(np.unique(grp_test))} contigs)")
+    _log(f"  Training partition : {len(X_train):>10,} positions  "
+         f"({len(np.unique(grp_train))} contigs)", indent=2)
+    _log(f"  Test partition     : {len(X_test):>10,} positions  "
+         f"({len(np.unique(grp_test))} contigs)", indent=2)
 
     # ── 4. DataLoaders ────────────────────────────────────────────────────────
-    print("\n[4/7] Building tiled DataLoaders …")
+    _log()
+    _log("[Stage 4/7]  Constructing tiled DataLoaders …")
     train_ds = ContigTileDataset(X_train, y_train, grp_train, pos_train, rn_train,
                                  stride=cfg.WINDOW_STRIDE)
     test_ds  = ContigTileDataset(X_test,  y_test,  grp_test,  pos_test,  rn_test)
-    print(f"  Train tiles: {len(train_ds)}  (stride={cfg.WINDOW_STRIDE})  "
-          f"|  Test tiles: {len(test_ds)}")
 
     num_workers = min(4, os.cpu_count() or 1)
-    print(f"  DataLoader workers: {num_workers}")
+    _log(f"  Training tiles   : {len(train_ds):>8,}  (stride = {cfg.WINDOW_STRIDE})", indent=2)
+    _log(f"  Test tiles       : {len(test_ds):>8,}", indent=2)
+    _log(f"  DataLoader workers : {num_workers}", indent=2)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.BATCH_SIZE, shuffle=True,
                               collate_fn=collate_fn, num_workers=num_workers, pin_memory=True)
@@ -258,27 +295,40 @@ def main():
                               collate_fn=collate_fn, num_workers=num_workers, pin_memory=True)
 
     # ── 5. Initialise model, loss, optimiser ─────────────────────────────────
-    print("\n[5/7] Initialising Transformer …")
+    _log()
+    _log("[Stage 5/7]  Initialising Transformer encoder …")
     in_ch = X.shape[1]
     model = ModTransformer(in_channels=in_ch).to(cfg.DEVICE)
-    print(f"  Trainable parameters: {count_parameters(model):,}")
-    print(f"  Input channels : {in_ch}     D_MODEL : {cfg.D_MODEL}")
-    print(f"  Heads : {cfg.NHEAD}    Layers : {cfg.NUM_LAYERS}    FFN dim : {cfg.DIM_FEEDFORWARD}")
+    _log(f"  Trainable parameters : {count_parameters(model):,}", indent=2)
+    _log(f"  Input channels       : {in_ch}", indent=2)
+    _log(f"  Embedding dimension  : {cfg.D_MODEL}", indent=2)
+    _log(f"  Attention heads      : {cfg.NHEAD}", indent=2)
+    _log(f"  Encoder layers       : {cfg.NUM_LAYERS}", indent=2)
+    _log(f"  FFN inner dimension  : {cfg.DIM_FEEDFORWARD}", indent=2)
 
     n_neg      = int((y_train == 0).sum())
     n_pos      = int((y_train == 1).sum())
     pos_weight = torch.tensor([math.sqrt(n_neg / max(n_pos, 1))], device=cfg.DEVICE)
-    print(f"  pos_weight = {pos_weight.item():.2f}  (neg={n_neg}, pos={n_pos})  [sqrt scale]")
+    _log(f"  Class imbalance      : neg = {n_neg:,}  /  pos = {n_pos:,}", indent=2)
+    _log(f"  BCEWithLogitsLoss pos_weight (√-scaled) : {pos_weight.item():.4f}", indent=2)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.LR, weight_decay=cfg.WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=cfg.NUM_EPOCHS, eta_min=cfg.LR / 20
     )
+    _log(f"  Optimiser            : AdamW  "
+         f"(lr = {cfg.LR},  weight_decay = {cfg.WEIGHT_DECAY})", indent=2)
+    _log(f"  LR schedule          : CosineAnnealingLR  "
+         f"(T_max = {cfg.NUM_EPOCHS},  η_min = {cfg.LR / 20:.2e})", indent=2)
 
     # ── 6. Training loop with early stopping ─────────────────────────────────
-    print(f"\n[6/7] Training for up to {cfg.NUM_EPOCHS} epochs "
-          f"(patience={cfg.PATIENCE}) …\n")
+    _log()
+    _log(f"[Stage 6/7]  Training  "
+         f"(max epochs = {cfg.NUM_EPOCHS},  patience = {cfg.PATIENCE}) …")
+    _log(f"  {'Epoch':>6}   {'Train Loss':>12}   {'Val Loss':>12}   {'Val AUPRC':>10}",
+         indent=2)
+    _log(f"  {'-'*6}   {'-'*12}   {'-'*12}   {'-'*10}", indent=2)
 
     best_auprc, best_epoch, patience_count, best_state = -1.0, 1, 0, None
     train_losses, val_losses, val_auprcs = [], [], []
@@ -293,9 +343,9 @@ def main():
         val_losses.append(val_loss)
         val_auprcs.append(val_auprc)
 
-        print(f"  Epoch {epoch:3d}/{cfg.NUM_EPOCHS}  "
-              f"train_loss={tr_loss:.5f}  val_loss={val_loss:.5f}  "
-              f"val_AUPRC={val_auprc:.4f}")
+        marker = "  ◀  best" if val_auprc > best_auprc else ""
+        _log(f"  {epoch:>6d}   {tr_loss:>12.5f}   {val_loss:>12.5f}   "
+             f"{val_auprc:>10.4f}{marker}", indent=2)
 
         if val_auprc > best_auprc:
             best_auprc     = val_auprc
@@ -305,34 +355,42 @@ def main():
         else:
             patience_count += 1
             if patience_count >= cfg.PATIENCE:
-                print(f"\n  Early stopping at epoch {epoch} "
-                      f"(no improvement for {cfg.PATIENCE} epochs).")
+                _log()
+                _log(f"  Early stopping triggered at epoch {epoch}  "
+                     f"(no improvement for {cfg.PATIENCE} consecutive epochs).", indent=2)
                 break
 
     model.load_state_dict(best_state)
     model.to(cfg.DEVICE)
-    print(f"\n  Best val AUPRC: {best_auprc:.4f}  (epoch {best_epoch})")
+    _log()
+    _log(f"  Training complete.  Best validation AUPRC = {best_auprc:.4f}  "
+         f"(epoch {best_epoch})", indent=2)
 
     # ── 7. Evaluate + LODO ───────────────────────────────────────────────────
-    print("\n[7/7] Evaluating and running leave-one-dataset-out …")
+    _log()
+    _log("[Stage 7/7]  Evaluation and leave-one-dataset-out (LODO) analysis …")
 
     plot_training_curves(train_losses, val_losses, val_auprcs, best_epoch)
+    _log("  Training curve figure written.", indent=2)
 
-    print("\n  Evaluating on held-out test contigs …")
+    _log()
+    _log("  Evaluating on held-out test contigs …", indent=2)
     _, y_true_all, y_prob_all = run_epoch(model, test_loader, criterion, None)
 
     auprc         = average_precision_score(y_true_all, y_prob_all)
     opt_threshold = plot_precision_recall(y_true_all, y_prob_all, auprc)
 
-    print(f"\n  — Metrics at default threshold ({cfg.THRESHOLD}) —")
+    _log()
+    _log(f"  ── Metrics at default threshold ({cfg.THRESHOLD}) ──", indent=2)
     evaluate(y_true_all, y_prob_all, threshold=cfg.THRESHOLD)
-    print(f"  — Metrics at optimal threshold ({opt_threshold:.4f}) —")
+    _log(f"  ── Metrics at optimal threshold ({opt_threshold:.4f}) ──", indent=2)
     evaluate(y_true_all, y_prob_all, threshold=opt_threshold)
 
     plot_confusion_matrix(y_true_all, y_prob_all, cfg.THRESHOLD,
                           out_path="transformer_confusion_matrix_default.png")
     plot_confusion_matrix(y_true_all, y_prob_all, opt_threshold,
                           out_path="transformer_confusion_matrix_optimal.png")
+    _log("  Confusion matrix figures written (default and optimal thresholds).", indent=2)
 
     # ── Save model checkpoint ─────────────────────────────────────────────────
     torch.save(
@@ -350,7 +408,7 @@ def main():
         },
         cfg.MODEL_OUT,
     )
-    print(f"\n  Model saved → {cfg.MODEL_OUT}")
+    _log(f"  Model checkpoint saved  →  {cfg.MODEL_OUT}", indent=2)
 
     # ── Per-position predictions TSV ──────────────────────────────────────────
     model.eval()
@@ -383,19 +441,22 @@ def main():
         {0: "unmod", 1: "modified"}
     )
     pred_df.to_csv(cfg.PRED_OUT, sep="\t", index=False)
-    print(f"  Predictions saved → {cfg.PRED_OUT}")
-    print(f"\n  ✓ Optimal threshold for deployment: {opt_threshold:.4f}")
+    _log(f"  Per-position predictions saved  →  {cfg.PRED_OUT}", indent=2)
+    _log(f"  Recommended deployment threshold : {opt_threshold:.4f}", indent=2)
 
     # ── Permutation feature importance ────────────────────────────────────────
-    print(f"\n  Computing permutation feature importance "
-          f"(n_repeats=5, this may take a few minutes) …")
+    _log()
+    _log("  Computing permutation feature importance  "
+         "(n_repeats = 5; this may take several minutes) …", indent=2)
     imp_df, baseline_auprc = compute_permutation_importance(
         model, X_test, y_test, grp_test, pos_test, rn_test,
         feat_cols, num_workers=num_workers, n_repeats=5,
     )
-    print("\n  Feature importance (top 20 by ΔAUPRC):")
-    print(imp_df.head(20).to_string(index=False))
+    _log()
+    _log("  Feature importance — top 20 features by ΔAUPRC:", indent=2)
+    _log(imp_df.head(20).to_string(index=False), indent=4)
     plot_feature_importance(imp_df, baseline_auprc)
+    _log("  Feature importance figure written.", indent=2)
 
     # ── Main model: pooled overall metrics (for the LOO comparison plot) ──────
     y_pred_opt = (y_prob_all >= opt_threshold).astype(int)
@@ -411,32 +472,52 @@ def main():
     }
 
     # ── Per-dataset breakdown (printed summary only) ───────────────────────────
-    print("\n  Computing per-dataset metrics for the main model …")
+    _log()
+    _log("  Computing per-dataset performance breakdown for the main model …", indent=2)
     main_metrics_by_ds = _main_model_metrics_by_dataset(pred_df, all_frames, opt_threshold)
+    _log(f"  {'Dataset':<10}  {'Precision':>10}  {'Recall':>8}  "
+         f"{'F1':>8}  {'AUPRC':>8}  {'N test':>10}  Notes", indent=2)
+    _log(f"  {'-'*10}  {'-'*10}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*30}",
+         indent=2)
     for name, mm in main_metrics_by_ds.items():
-        flag = " [all-unmod: metrics vs label=0]" if mm["all_unmod"] else ""
-        print(f"    {name:<6}  Prec={mm['precision']:.4f}  Rec={mm['recall']:.4f}  "
-              f"F1={mm['f1']:.4f}  AUPRC={mm['auprc']:.4f}  "
-              f"n_test={mm['n_test']:,}{flag}")
+        note = "all-unmodified: metrics computed against label=0" if mm["all_unmod"] else ""
+        _log(f"  {name:<10}  {mm['precision']:>10.4f}  {mm['recall']:>8.4f}  "
+             f"{mm['f1']:>8.4f}  {mm['auprc']:>8.4f}  {mm['n_test']:>10,}  {note}", indent=2)
 
     # ── LODO: train 4 models, each leaving one dataset out ───────────────────
-    print(f"\n  Running leave-one-dataset-out evaluation …")
+    _log()
+    _log("  Initiating leave-one-dataset-out (LODO) evaluation …", indent=2)
     loo_metrics: list[dict] = []
     for name, _, _ in DATASETS:
+        _log(f"    Holding out dataset '{name}' …", indent=2)
         result = run_lodo(name, all_frames, num_workers)
         loo_metrics.append(result)
 
     # ── Summary table ─────────────────────────────────────────────────────────
-    print(f"\n{'═'*60}")
-    print("  LODO Summary")
-    print(f"{'═'*60}")
+    _log()
+    _log("=" * 68)
+    _log("  LODO Evaluation Summary")
+    _log("=" * 68)
     loo_df = pd.DataFrame([{k: v for k, v in m.items() if k != "all_unmod"}
                            for m in loo_metrics])
-    print(loo_df.to_string(index=False))
+    _log(loo_df.to_string(index=False))
+    _log("=" * 68)
 
     # ── LODO comparison plot + TSV ────────────────────────────────────────────
     plot_loo_results(loo_metrics, main_overall)
     save_loo_metrics_tsv(loo_metrics, main_overall)
+    _log("  LODO comparison plot and metrics TSV written.", indent=2)
+
+    t_end     = datetime.now(timezone.utc)
+    elapsed   = t_end - t_start
+    h, rem    = divmod(int(elapsed.total_seconds()), 3600)
+    m, s      = divmod(rem, 60)
+    _log()
+    _log("=" * 68)
+    _log(f"  Pipeline complete.")
+    _log(f"  Run finished : {t_end.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    _log(f"  Elapsed time : {h:02d}h {m:02d}m {s:02d}s")
+    _log("=" * 68)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
