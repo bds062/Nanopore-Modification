@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Generated data and model artifacts
+data/
+results/
+logs/
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.pod5
+*.bam
+*.bai
+*.fast5
+
+# Plot/output scratch
+*.out
+*.log
+.tmp_*/
+
+# OS/editor
+.DS_Store
+*.swp
+
+# Docs
+/docs/
