@@ -14,17 +14,18 @@ TSV_5MC   = f"{DATA_DIR}/5mC.tsv"
 TSV_5HMC  = f"{DATA_DIR}/5hmC.tsv"
 TSV_6MA   = f"{DATA_DIR}/6mA.tsv"
 
-#Old paths:
-# TSV_UNMOD = "/fs/nexus-scratch/bds062/results/event_clustering_control/pred_mods.tsv"
-# TSV_5MC = "/fs/nexus-scratch/bds062/results/event_clustering_5mC/pred_mods.tsv"
-# TSV_5HMC = "/fs/nexus-scratch/bds062/results/event_clustering_5hmC/pred_mods.tsv"
-# TSV_6MA = "/fs/nexus-scratch/bds062/results/event_clustering_6mA/pred_mods.tsv"
-
 # ── Output paths ──────────────────────────────────────────────────────────────
-MODEL_OUT      = "transformer_mod_classifier.pt"
-PRED_OUT       = "transformer_predictions.tsv"
-PR_FIG_OUT     = "transformer_prc.png"
-TRAIN_FIG_OUT  = "transformer_training_curves.png"
+OUT_DIR               = "."
+MODEL_OUT             = "transformer_mod_classifier.pt"
+PRED_OUT              = "transformer_predictions.tsv"
+PR_FIG_OUT            = "transformer_prc.png"
+TRAIN_FIG_OUT         = "transformer_training_curves.png"
+CONFUSION_DEFAULT_OUT = "transformer_confusion_matrix_default.png"
+CONFUSION_OPTIMAL_OUT = "transformer_confusion_matrix_optimal.png"
+FEAT_IMP_FIG_OUT      = "transformer_feature_importance.png"
+LOO_FIG_OUT           = "transformer_loo_results.png"
+LOO_METRICS_OUT       = "transformer_loo_metrics.tsv"
+LOO_TRAIN_FIG_PREFIX  = "transformer_loo_training_curves"   # + _{name}.png
 
 # ── Feature configuration ─────────────────────────────────────────────────────
 SCALAR_FEATURES = ["mean_dev", "std_dev", "diff1", "t_stat", "mean_dwell", "dwell_var"]

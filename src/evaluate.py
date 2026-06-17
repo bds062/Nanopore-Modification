@@ -28,10 +28,8 @@ from sklearn.metrics import (
     f1_score,
 )
 
-from config import (
-    THRESHOLD, SEED, BATCH_SIZE, DEVICE,
-    PR_FIG_OUT, TRAIN_FIG_OUT,
-)
+import config as cfg
+from config import THRESHOLD, SEED, BATCH_SIZE, DEVICE
 from dataset import ContigTileDataset, collate_fn
 
 
@@ -62,7 +60,7 @@ def plot_precision_recall(
     y_true:   np.ndarray,
     y_prob:   np.ndarray,
     auprc:    float,
-    out_path: str = PR_FIG_OUT,
+    out_path: str | None = None,
 ) -> float:
     """
     Two-panel figure:
@@ -71,6 +69,9 @@ def plot_precision_recall(
 
     Returns the threshold that maximises F1.
     """
+    if out_path is None:
+        out_path = cfg.PR_FIG_OUT
+
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
     f1_scores = (
         2 * precisions[:-1] * recalls[:-1]
@@ -131,7 +132,7 @@ def plot_training_curves(
     val_losses:   list[float],
     val_auprcs:   list[float],
     best_epoch:   int,
-    out_path:     str = TRAIN_FIG_OUT,
+    out_path:     str | None = None,
 ) -> None:
     """
     Two-panel figure:
@@ -140,6 +141,9 @@ def plot_training_curves(
 
     A dashed vertical line marks the epoch restored by early stopping.
     """
+    if out_path is None:
+        out_path = cfg.TRAIN_FIG_OUT
+
     epochs = list(range(1, len(train_losses) + 1))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -172,13 +176,16 @@ def plot_confusion_matrix(
     y_true:    np.ndarray,
     y_prob:    np.ndarray,
     threshold: float,
-    out_path:  str = "transformer_confusion_matrix.png",
+    out_path:  str | None = None,
 ) -> None:
     """
     Saves a confusion matrix heatmap normalised by true-class totals (row-wise),
     so colour intensity reflects per-class recall rather than raw counts.
     Each cell shows both the raw count and the row percentage.
     """
+    if out_path is None:
+        out_path = cfg.CONFUSION_DEFAULT_OUT
+
     y_pred  = (y_prob >= threshold).astype(int)
     cm      = confusion_matrix(y_true, y_pred)
     cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
@@ -215,12 +222,15 @@ def plot_feature_importance(
     imp_df:         pd.DataFrame,
     baseline_auprc: float,
     top_n:          int = 20,
-    out_path:       str = "transformer_feature_importance.png",
+    out_path:       str | None = None,
 ) -> None:
     """
     Horizontal bar chart of permutation feature importances (top_n features).
     Error bars show ±1 std across permutation repeats.
     """
+    if out_path is None:
+        out_path = cfg.FEAT_IMP_FIG_OUT
+
     df  = imp_df.head(top_n).iloc[::-1]    # reverse so highest is at top
     fig, ax = plt.subplots(figsize=(9, max(4, top_n * 0.35)))
 
@@ -252,7 +262,7 @@ def _infer(model: torch.nn.Module, loader: DataLoader) -> tuple[np.ndarray, np.n
         for x, y_batch, mask, _ in loader:
             x       = x.to(DEVICE)
             mask_d  = mask.to(DEVICE)
-            logits  = model(x, mask=mask_d)           # (B, 1, W)
+            logits  = model(x, mask=mask_d)
             probs   = torch.sigmoid(logits).squeeze(1).cpu().numpy()
             y_np    = y_batch.squeeze(1).numpy()
             mask_np = mask.numpy()

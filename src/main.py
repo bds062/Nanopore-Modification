@@ -66,17 +66,9 @@ from loo import (
 # ── Logging helper ─────────────────────────────────────────────────────────────
 
 def _log(msg: str = "", indent: int = 0) -> None:
-    """Print *msg* prefixed with a UTC ISO-8601 timestamp.
-
-    Parameters
-    ----------
-    msg    : Text to display.  An empty string emits a blank timestamped line.
-    indent : Number of additional leading spaces (applied after the prefix).
-    """
     ts     = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     prefix = f"[{ts}]"
     pad    = " " * indent
-    # Preserve multi-line messages by stamping every line.
     for line in msg.split("\n"):
         print(f"{prefix}{pad} {line}" if line.strip() else f"{prefix}")
 
@@ -89,19 +81,6 @@ def run_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer | None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
-    """
-    One full pass over `loader`.
-
-    Passes the real-position boolean mask to the model so the Transformer's
-    key-padding mask excludes padded positions, then applies the same mask to
-    the loss to avoid back-propagating through padding.
-
-    Returns
-    -------
-    mean_loss : float
-    y_true    : 1-D ndarray of ground-truth labels (real positions only)
-    y_prob    : 1-D ndarray of sigmoid probabilities (real positions only)
-    """
     training = optimizer is not None
     model.train(training)
     context  = torch.enable_grad() if training else torch.no_grad()
@@ -140,25 +119,8 @@ def _main_model_metrics_by_dataset(
     pred_df:       pd.DataFrame,
     all_frames:    dict[str, pd.DataFrame],
     opt_threshold: float,
+    datasets:      list,
 ) -> dict[str, dict]:
-    """
-    Break down the main model's test-set predictions by source dataset.
-
-    Used only for the printed per-dataset summary; the LOO comparison plot
-    uses the main model's pooled overall metrics instead.
-
-    Parameters
-    ----------
-    pred_df       : DataFrame with columns ref_name, ref_pos, label, prob_modified
-    all_frames    : the same dict[name → DataFrame] used during training
-    opt_threshold : optimal threshold from the main model's overall PR curve
-
-    Returns
-    -------
-    dict mapping dataset_name → metric dict
-        (keys: precision, recall, f1, auprc, threshold, n_test, all_unmod)
-    """
-    # Build a lookup: (ref_name, ref_pos) → dataset name
     tag_rows = []
     for name, frame in all_frames.items():
         tag_rows.append(frame[["ref_name", "ref_pos"]].assign(dataset=name))
@@ -167,7 +129,7 @@ def _main_model_metrics_by_dataset(
     merged = pred_df.merge(tag_df, on=["ref_name", "ref_pos"], how="left")
 
     results: dict[str, dict] = {}
-    for name, _, _ in DATASETS:
+    for name, _, _ in datasets:
         subset = merged[merged["dataset"] == name]
         if subset.empty:
             results[name] = {
@@ -308,7 +270,13 @@ def main():
 
     n_neg      = int((y_train == 0).sum())
     n_pos      = int((y_train == 1).sum())
-    pos_weight = torch.tensor([math.sqrt(n_neg / max(n_pos, 1))], device=cfg.DEVICE)
+    #original weight
+    # pos_weight = torch.tensor([math.sqrt(n_neg / max(n_pos, 1))], device=cfg.DEVICE)
+    #geometric mean
+    # raw_ratio  = n_neg / max(n_pos, 1)
+    # pos_weight = torch.tensor([math.sqrt(raw_ratio * math.sqrt(raw_ratio))], device=cfg.DEVICE)
+    #raw ratio
+    pos_weight = torch.tensor([n_neg / max(n_pos, 1)], device=cfg.DEVICE)
     _log(f"  Class imbalance      : neg = {n_neg:,}  /  pos = {n_pos:,}", indent=2)
     _log(f"  BCEWithLogitsLoss pos_weight (√-scaled) : {pos_weight.item():.4f}", indent=2)
 
@@ -387,9 +355,9 @@ def main():
     evaluate(y_true_all, y_prob_all, threshold=opt_threshold)
 
     plot_confusion_matrix(y_true_all, y_prob_all, cfg.THRESHOLD,
-                          out_path="transformer_confusion_matrix_default.png")
+                          out_path=cfg.CONFUSION_DEFAULT_OUT)
     plot_confusion_matrix(y_true_all, y_prob_all, opt_threshold,
-                          out_path="transformer_confusion_matrix_optimal.png")
+                          out_path=cfg.CONFUSION_OPTIMAL_OUT)
     _log("  Confusion matrix figures written (default and optimal thresholds).", indent=2)
 
     # ── Save model checkpoint ─────────────────────────────────────────────────
@@ -474,7 +442,7 @@ def main():
     # ── Per-dataset breakdown (printed summary only) ───────────────────────────
     _log()
     _log("  Computing per-dataset performance breakdown for the main model …", indent=2)
-    main_metrics_by_ds = _main_model_metrics_by_dataset(pred_df, all_frames, opt_threshold)
+    main_metrics_by_ds = _main_model_metrics_by_dataset(pred_df, all_frames, opt_threshold, DATASETS)
     _log(f"  {'Dataset':<10}  {'Precision':>10}  {'Recall':>8}  "
          f"{'F1':>8}  {'AUPRC':>8}  {'N test':>10}  Notes", indent=2)
     _log(f"  {'-'*10}  {'-'*10}  {'-'*8}  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*30}",
@@ -587,8 +555,14 @@ def _apply_cli_overrides(args: argparse.Namespace) -> None:
 
     if args.out_dir is not None:
         os.makedirs(args.out_dir, exist_ok=True)
-        for attr in ("MODEL_OUT", "PRED_OUT", "PR_FIG_OUT", "TRAIN_FIG_OUT"):
+        cfg.OUT_DIR = args.out_dir
+        for attr in (
+            "MODEL_OUT", "PRED_OUT", "PR_FIG_OUT", "TRAIN_FIG_OUT",
+            "CONFUSION_DEFAULT_OUT", "CONFUSION_OPTIMAL_OUT",
+            "FEAT_IMP_FIG_OUT", "LOO_FIG_OUT", "LOO_METRICS_OUT",
+        ):
             setattr(cfg, attr, os.path.join(args.out_dir, os.path.basename(getattr(cfg, attr))))
+        cfg.LOO_TRAIN_FIG_PREFIX = os.path.join(args.out_dir, "transformer_loo_training_curves")
 
 
 if __name__ == "__main__":

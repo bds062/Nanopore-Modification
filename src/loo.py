@@ -37,9 +37,8 @@ from evaluate import plot_training_curves
 from features import build_feature_matrix
 from model import ModTransformer, count_parameters
 
+
 # ── Dataset registry ──────────────────────────────────────────────────────────
-# Returned as a function so cfg.TSV_* are read at call time, after any CLI
-# overrides have been applied (module-level lists capture values at import time).
 
 def get_datasets() -> list[tuple[str, str, bool]]:
     """Return the ordered list of (name, tsv_path, is_modified) tuples."""
@@ -49,9 +48,6 @@ def get_datasets() -> list[tuple[str, str, bool]]:
         ("5hmC",  cfg.TSV_5HMC,  True),
         ("6mA",   cfg.TSV_6MA,   True),
     ]
-
-LOO_FIG_OUT     = "transformer_loo_results.png"
-LOO_METRICS_OUT = "transformer_loo_metrics.tsv"
 
 
 # ── Epoch helper (duplicated from main.py to avoid circular import) ───────────
@@ -252,7 +248,7 @@ def run_lodo(
 
     plot_training_curves(
         train_losses, val_losses, val_auprcs, best_epoch,
-        out_path=f"transformer_loo_training_curves_{held_out_name}.png",
+        out_path=f"{cfg.LOO_TRAIN_FIG_PREFIX}_{held_out_name}.png",
     )
 
     _, y_true, y_prob = _run_epoch(model, test_loader, criterion, None)
@@ -280,7 +276,7 @@ def run_lodo(
 def plot_loo_results(
     loo_metrics:   list[dict],
     main_overall:  dict,
-    out_path:      str = LOO_FIG_OUT,
+    out_path:      str | None = None,
 ) -> None:
     """
     Single-panel figure with 5 groups of 3 bars each.
@@ -293,16 +289,10 @@ def plot_loo_results(
                    3 datasets, tested on ALL contigs of the held-out dataset)
 
     Within each group there are 3 bars: Precision, Recall, F1.
-
-    Parameters
-    ----------
-    loo_metrics   : list of dicts returned by run_lodo, one per held-out dataset
-    main_overall  : metric dict for the main model's pooled test set
-                    (keys: precision, recall, f1)
-    out_path      : output PNG path
     """
-    # ── Build groups ──────────────────────────────────────────────────────────
-    # Each entry: (group_label, precision, recall, f1, all_unmod)
+    if out_path is None:
+        out_path = cfg.LOO_FIG_OUT
+
     groups: list[tuple[str, float, float, float, bool]] = []
 
     groups.append((
@@ -321,8 +311,8 @@ def plot_loo_results(
 
     n_groups = len(groups)
     x        = np.arange(n_groups)
-    width    = 0.22          # width of each individual bar
-    offsets  = [-width, 0, width]   # Precision, Recall, F1
+    width    = 0.22
+    offsets  = [-width, 0, width]
 
     COLOURS = {
         "Precision": "#2166ac",
@@ -333,7 +323,7 @@ def plot_loo_results(
     fig, ax = plt.subplots(figsize=(13, 6))
 
     metric_keys = ["Precision", "Recall", "F1"]
-    value_index = [1, 2, 3]   # indices into the groups tuple
+    value_index = [1, 2, 3]
 
     bars_by_metric: dict[str, list] = {}
     for metric, offset, vi in zip(metric_keys, offsets, value_index):
@@ -347,7 +337,6 @@ def plot_loo_results(
         )
         bars_by_metric[metric] = bars
 
-        # Value annotations (rotated, above each bar)
         for b, v in zip(bars, vals):
             ax.text(
                 b.get_x() + b.get_width() / 2,
@@ -358,10 +347,8 @@ def plot_loo_results(
                 color="dimgrey",
             )
 
-    # Vertical separator between the Main group and the LOO groups
     ax.axvline(x=0.5, color="grey", linewidth=0.8, linestyle="--", alpha=0.6)
 
-    # x-axis labels
     tick_labels = [g[0] for g in groups]
     ax.set_xticks(x)
     ax.set_xticklabels(tick_labels, fontsize=9)
@@ -378,7 +365,6 @@ def plot_loo_results(
     ax.set_axisbelow(True)
     ax.legend(fontsize=9, loc="lower right", framealpha=0.85)
 
-    # Footnote if any LOO dataset is all-unmodified
     has_unmod_note = any(g[4] for g in groups)
     if has_unmod_note:
         fig.text(
@@ -398,12 +384,14 @@ def plot_loo_results(
 def save_loo_metrics_tsv(
     loo_metrics:  list[dict],
     main_overall: dict,
-    out_path:     str = LOO_METRICS_OUT,
+    out_path:     str | None = None,
 ) -> None:
     """Write a combined TSV with one row per model (main + 4 LOO)."""
+    if out_path is None:
+        out_path = cfg.LOO_METRICS_OUT
+
     rows = []
 
-    # Main model row
     rows.append({
         "model":     "Main",
         "held_out":  "all (pooled test set)",
@@ -416,7 +404,6 @@ def save_loo_metrics_tsv(
         "n_test":    main_overall.get("n_test",  ""),
     })
 
-    # LOO rows
     for m in loo_metrics:
         rows.append({"model": "LODO", **{k: v for k, v in m.items() if k != "all_unmod"}})
 
