@@ -128,3 +128,82 @@ scripts/benchmarks/run_rockfish_remora_only.sh
 
 Both scripts default to the current `/fs/nexus-scratch/bds062` workspace layout,
 but all important paths can be overridden with environment variables.
+
+## Testing a Trained Model on a New Dataset
+
+Use the generic pipeline runner when you have a POD5 file/directory, aligned
+BAM, and either `peaks_refined.tsv` or a Dorado moves TSV:
+
+```bash
+scripts/run_deepmod_pipeline.sh \
+  --dataset my_sample \
+  --pod5 /path/to/sample.pod5 \
+  --bam /path/to/reads_refined.bam \
+  --peaks /path/to/peaks_refined.tsv \
+  --level-table /path/to/uncalled_r1041_model_only_means.txt \
+  --model /path/to/best_model.pt \
+  --out-dir results/deepmod_my_sample
+```
+
+The runner writes HDF5 features, reference-level predictions, a score summary,
+a score histogram, thresholded BED-style calls, and logs. Example launchers for
+the current workspace live in:
+
+```text
+/fs/nexus-scratch/bds062/results/deepmod_barcode4/run_deepmod_test.sh
+/fs/nexus-scratch/bds062/results/deemod_d9/run_deepmod_test.sh
+```
+
+## Comparing DeepMod to Dorado Mod Calls
+
+Use the Dorado comparison runner when you want to treat Dorado MM/ML modified
+base calls as reference labels for a quick sanity check:
+
+```bash
+scripts/run_deepmod_vs_dorado.sh \
+  --dataset my_sample \
+  --pod5 /path/to/sample.pod5 \
+  --bam /path/to/reads_refined.bam \
+  --peaks /path/to/peaks_refined.tsv \
+  --reference /path/to/ref.fa \
+  --level-table /path/to/uncalled_r1041_model_only_means.txt \
+  --deepmod-model /path/to/best_model.pt \
+  --out-dir results/deepmod_vs_dorado_my_sample
+```
+
+By default this uses Dorado 1.4.0 R10.4.1 SUP `v5.2.0` from the local
+RawHash2 installation and runs the newest compatible DNA modification model in
+each detected family, including 5mC/5hmC, CpG 5mC/5hmC, 6mA, and 4mC/5mC when
+available. The runner asks Dorado to emit candidate modified-base calls with
+`--modified-bases-threshold 0`, then applies its own `--dorado-threshold 0.5`
+when making binary reference labels. The output includes Dorado-aligned BAMs,
+Dorado reference-level labels, DeepMod-vs-Dorado joined tables, per-type PR/F1
+and confusion plots, and a summary accuracy/F1/AUPRC figure.
+
+Current workspace examples:
+
+```bash
+/fs/nexus-scratch/bds062/Nanopore-Modification/scripts/run_deepmod_vs_dorado.sh \
+  --dataset barcode4 \
+  --pod5 /fs/nexus-scratch/bds062/data/barcode4_filtered/barcode4_filtered.pod5 \
+  --bam /fs/nexus-scratch/bds062/results/event_clustering_barcode4/basecalled/reads_refined_filtered.bam \
+  --peaks /fs/nexus-scratch/bds062/results/event_clustering_barcode4/basecalled/peaks_refined.tsv \
+  --reference /fs/cbcb-lab/storm/shared/umbc-ont-data/ref/SPO1_FJ230960.1.fasta \
+  --level-table /fs/nexus-scratch/bds062/results/event_clustering_barcode4/uncalled_r1041_model_only_means.txt \
+  --deepmod-model /fs/nexus-scratch/bds062/results/deep_modification/results6/best_model.pt \
+  --out-dir /fs/nexus-scratch/bds062/results/deepmod_barcode4/dorado_comparison \
+  --min-mapq 0
+```
+
+```bash
+/fs/nexus-scratch/bds062/Nanopore-Modification/scripts/run_deepmod_vs_dorado.sh \
+  --dataset d9 \
+  --pod5 /fs/nexus-scratch/bds062/results/event_clustering_d9/d9_small.pod5 \
+  --bam /fs/nexus-scratch/bds062/results/event_clustering_d9/reads_refined.bam \
+  --peaks /fs/nexus-scratch/bds062/results/event_clustering_d9/peaks_refined.tsv \
+  --reference /fs/cbcb-lab/storm/shared/rawhash2/data/d9_ecoli_r1041/ref.fa \
+  --level-table /fs/nexus-scratch/bds062/results/event_clustering_d9/uncalled_r1041_model_only_means.txt \
+  --deepmod-model /fs/nexus-scratch/bds062/results/deep_modification/results6/best_model.pt \
+  --out-dir /fs/nexus-scratch/bds062/results/deemod_d9/dorado_comparison \
+  --min-mapq 0
+```
