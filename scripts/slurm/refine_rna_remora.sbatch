@@ -19,14 +19,18 @@ set -euo pipefail
 # environment variables, mirroring scripts/gen_features.sh.
 
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate ${CONDA_ENV:-uncalled4-env}
+# Compute nodes have no internet, so refinement runs in a prebuilt env that
+# already has remora. campolina (remora 3.3.0) is the default; override with
+# CONDA_ENV=<name-or-path> if needed.
+conda activate ${CONDA_ENV:-/fs/nexus-scratch/bds062/envs/campolina}
 module load samtools/1.16 2>/dev/null || true
 
-# Dependencies for refine_moves_remora.py
-python -c "import remora" 2>/dev/null || pip install ont-remora -q
-python -c "import pod5"   2>/dev/null || pip install pod5 -q
-python -c "import pysam"  2>/dev/null || pip install pysam -q
-python -c "import tqdm"   2>/dev/null || pip install tqdm -q
+# Fail fast with a clear message if any refinement dependency is missing.
+python -c "import remora, pod5, pysam, numpy, tqdm" || {
+    echo "ERROR: refine deps missing in $(which python)." >&2
+    echo "Set CONDA_ENV to an env with remora+pod5+pysam (e.g. campolina)." >&2
+    exit 1
+}
 
 DATADIR=${DATADIR:-~/rna_mod_validation}
 DATADIR=$(eval echo "$DATADIR")
