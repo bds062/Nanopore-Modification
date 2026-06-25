@@ -97,6 +97,7 @@ BASE_ONEHOT = {
     'C': (0, 1, 0, 0),
     'G': (0, 0, 1, 0),
     'T': (0, 0, 0, 1),
+    'U': (0, 0, 0, 1),   # RNA: uracil shares the is_T channel
     'N': (0, 0, 0, 0),
 }
 # Channel layout (for reference):
@@ -175,11 +176,30 @@ def load_gt(path: str) -> set:
     return gt_set
 
 
-_COMP = str.maketrans('ACGT', 'TGCA')
+_COMP = str.maketrans('ACGTU', 'TGCAA')
 
 
 def _revcomp(seq: str) -> str:
     return seq.translate(_COMP)[::-1]
+
+
+def normalize_orientation(peaks, ref_seq, ref_positions):
+    """Put signal segments and reference bases into the same order.
+
+    Direct-RNA reads are sequenced 3'->5', so reference-anchored segmentation
+    (Remora ref_to_signal / our refined peaks) comes back with *descending*
+    sample indices relative to the 5'->3' reference. Reversing the peaks together
+    with the reference pairing puts segment i back in register with the base it
+    actually covers. This is a no-op for the ascending peaks produced by DNA
+    (and by move-table segmentation), so the DNA path is unaffected.
+    """
+    if peaks is None or len(peaks) < 2 or ref_seq is None:
+        return peaks, ref_seq, ref_positions
+    if peaks[0] > peaks[-1]:
+        peaks = peaks[::-1]
+        ref_seq = ref_seq[::-1]
+        ref_positions = ref_positions[::-1]
+    return peaks, ref_seq, ref_positions
 
 
 # ── BAM helpers ───────────────────────────────────────────────────────────────
@@ -322,6 +342,9 @@ def extract_base_segments(signal: np.ndarray,
         'strand':       int                      +1 or -1
     }
     """
+    peaks, ref_seq, ref_positions = normalize_orientation(
+        peaks, ref_seq, ref_positions)
+
     n_segments = len(peaks) - 1
     n_bases    = len(ref_seq)
     n_usable   = min(n_segments, n_bases)
@@ -622,6 +645,11 @@ def main():
                              '(auto-detected from 50 reads if not set).')
     parser.add_argument('--seed',        type=int, default=42,
                         help='RNG seed for read subsampling (default: 42)')
+    parser.add_argument('--rna', action='store_true',
+                        help='RNA mode: treat U as T in the base one-hot and '
+                             'k-mer level lookups, and auto-correct 3\'->5\' '
+                             'signal orientation. Direct RNA is strand-specific '
+                             '(forward reads only). No effect on DNA datasets.')
     args = parser.parse_args()
 
     if args.max_images_per_base is not None and args.max_images_per_base < 1:
@@ -665,6 +693,11 @@ def main():
     if args.level_table:
         print(f"Loading level table: {args.level_table}", file=sys.stderr)
         kmer_levels_raw = load_level_table(args.level_table)
+        if args.rna:
+            # Reference k-mers are built from the FASTA (T alphabet); fold any
+            # U-keyed RNA table entries onto T so lookups match.
+            kmer_levels_raw = {k.replace('U', 'T'): v
+                               for k, v in kmer_levels_raw.items()}
         kmer_size = len(next(iter(kmer_levels_raw)))
         print(f"  {len(kmer_levels_raw):,} k-mers, k={kmer_size}", file=sys.stderr)
 
@@ -699,6 +732,8 @@ def main():
                     peaks  = seg_borders[read_id]
                     ref_seq, ref_positions = get_ref_info_from_bam(bam_read)
                     if ref_seq is not None:
+                        peaks, ref_seq, ref_positions = normalize_orientation(
+                            peaks, ref_seq, ref_positions)
                         sample_data.append((sig, peaks, ref_seq, ref_positions))
                 except Exception:
                     continue
@@ -901,6 +936,7 @@ def main():
             'strand', 'mapq_norm', 'matches_ref',
         ]
         hf.attrs['normalization'] = 'MAD' if args.normalize else 'zscore'
+        hf.attrs['chemistry']     = 'RNA' if args.rna else 'DNA'
         hf.attrs['ref_row']       = 'row_0'
         hf.attrs['label_semantics'] = 'binary_modified_vs_unmodified'
         hf.attrs['read_order']    = 'haplotype_then_alignment_start'
