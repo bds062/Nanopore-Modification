@@ -40,13 +40,17 @@ OUTDIR=${OUTDIR:-$DATADIR/refined}
 LEVEL_TSV=${LEVEL_TSV:-$DATADIR/references/rna004_9mer_levels.tsv}
 mkdir -p $OUTDIR
 
-# RawHash2 refinement helper (clone if absent)
+# RawHash2 refinement helper (clone if absent). Serialize the clone with flock
+# so concurrent array tasks don't race on the same destination directory.
 REFINE=${REFINE:-~/src/RawHash2/test/scripts/refine_moves_remora.py}
 REFINE=$(eval echo "$REFINE")
-if [[ ! -f $REFINE ]]; then
-    mkdir -p ~/src
-    git clone --depth 1 https://github.com/STORMgroup/RawHash2.git ~/src/RawHash2
-fi
+mkdir -p ~/src
+(
+    flock 200
+    if [[ ! -f $REFINE ]]; then
+        git clone --depth 1 https://github.com/STORMgroup/RawHash2.git ~/src/RawHash2
+    fi
+) 200>~/src/.rawhash2_clone.lock
 
 # Remora wants a header-less, whitespace-separated table with exactly 4^k rows.
 LEVEL_TABLE=$DATADIR/references/rna004_9mer_levels_remora.txt
