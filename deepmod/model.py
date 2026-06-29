@@ -194,6 +194,14 @@ class PileupDataset(Dataset):
     Tensor on disk : (H, W, C)  where H = max_reads+1, C = 9
     Returned       : (C, H, W)  channels-first for PyTorch Conv2d
 
+    When delta_channels=True (default), two extra channels are appended at
+    load time without any re-featurization:
+      Ch 9  read_supports_modification : per-read center-position signal
+                deviation from expected kmer level, broadcast across the
+                full row (analogous to DeepVariant's read_supports_variant).
+      Ch 10 window_delta               : per-sample full-window deviation
+                (observed signal minus expected kmer level) for all positions.
+
     HDF5 file handles are cached per-process (see _get_h5) so that
     multiprocessing DataLoader workers do not share handles and deadlock.
     """
@@ -201,20 +209,25 @@ class PileupDataset(Dataset):
                  file_sizes: np.ndarray,
                  augment: bool = False, seed: int = 42,
                  rc_augment: bool = False,
-                 signal_noise_std: float = 0.05):
+                 signal_noise_std: float = 0.05,
+                 delta_channels: bool = True):
         self.h5_paths   = h5_paths
         self.indices    = indices
         self.file_sizes = file_sizes
         self.augment    = augment
         self.rc_augment = rc_augment
         self.signal_noise_std = signal_noise_std
+        self.delta_channels   = delta_channels
         self.rng        = np.random.default_rng(seed)
         self.offsets    = np.concatenate([[0], np.cumsum(file_sizes)])
 
         with h5py.File(h5_paths[0], 'r') as hf:
-            self.n_channels = int(hf.attrs.get('n_channels', 9))
+            self.n_channels       = int(hf.attrs.get('n_channels', 9))
             self.window_positions = int(hf.attrs.get('W', 0))
             self.samples_per_base = int(hf.attrs.get('L', 0))
+            # center_idx: which window position is the candidate base (0-based)
+            self.center_idx = int(hf.attrs.get(
+                'center_idx', self.window_positions // 2))
 
     def _resolve(self, global_idx: int) -> tuple:
         file_idx  = int(np.searchsorted(self.offsets[1:], global_idx, side='right'))
@@ -250,6 +263,28 @@ class PileupDataset(Dataset):
             if self.rc_augment and self.rng.random() < 0.5:
                 x = reverse_complement_tensor(
                     x, self.window_positions, self.samples_per_base)
+
+        # Append delta channels after augmentation so they are consistent with
+        # the (potentially noised) raw signal channel the model sees.
+        if self.delta_channels and self.samples_per_base > 0:
+            L  = self.samples_per_base
+            ci = self.center_idx
+            cs, ce = ci * L, ci * L + L          # center base column slice
+
+            # Ch 9: per-read center-position delta broadcast across the full
+            # row — the deepmod analogue of DeepVariant's read_supports_variant.
+            # x[0, 0, cs:ce] = expected kmer level at center (reference row).
+            # x[0, 1:, cs:ce] = observed signal at center for each read.
+            ref_ctr  = float(x[0, 0, cs:ce].mean())
+            read_ctr = x[0, 1:, cs:ce].mean(axis=1)     # (H-1,)
+            ch9 = np.zeros((1, x.shape[1], x.shape[2]), dtype=np.float32)
+            ch9[0, 1:, :] = (read_ctr - ref_ctr)[:, np.newaxis]
+
+            # Ch 10: full-window per-sample delta (observed minus expected).
+            ch10 = np.zeros((1, x.shape[1], x.shape[2]), dtype=np.float32)
+            ch10[0, 1:] = x[0, 1:] - x[0, 0]
+
+            x = np.concatenate([x, ch9, ch10], axis=0)  # (C+2, H, W)
 
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.float32)
 
@@ -943,8 +978,10 @@ def save_main_training_state(
     val_auprcs: list[float],
     args,
     in_ch: int,
+    global_step: int = 0,
+    warmup_sched=None,
 ) -> None:
-    torch.save({
+    state = {
         'epoch': int(epoch),
         'model_state': model.state_dict(),
         'optimizer_state': optimizer.state_dict(),
@@ -957,7 +994,11 @@ def save_main_training_state(
         'val_auprcs': list(val_auprcs),
         'args': vars(args),
         'in_channels': int(in_ch),
-    }, path)
+        'global_step': int(global_step),
+    }
+    if warmup_sched is not None:
+        state['warmup_sched_state'] = warmup_sched.state_dict()
+    torch.save(state, path)
 
 
 def load_main_metrics(pred_path: Path, ckpt_path: Path) -> dict | None:
@@ -1096,6 +1137,17 @@ def main():
                         help='Ignore existing checkpoint files and rerun all '
                              'stages from scratch.  By default the script '
                              'resumes from wherever it left off.')
+    parser.add_argument('--no-delta-channels', action='store_true',
+                        help='Disable the two computed delta channels (9 and '
+                             '10). By default, ch9 (per-read center-position '
+                             'signal deviation broadcast across the row) and '
+                             'ch10 (full-window signal deviation) are appended '
+                             'at load time from existing HDF5 data without '
+                             're-featurization. Pass this flag to ablate.')
+    parser.add_argument('--lr-warmup-steps', type=int, default=0,
+                        help='Number of optimizer steps for linear LR warmup. '
+                             'LR ramps from ~0 to --lr over this many steps '
+                             'before ReduceLROnPlateau takes over. 0 disables.')
     args = parser.parse_args()
 
     # Warn about bad combination
@@ -1127,13 +1179,16 @@ def main():
           f"(modified={int(labels.sum()):,}  "
           f"unmodified={N-int(labels.sum()):,})", file=sys.stderr)
 
-    in_ch  = int(attrs.get('n_channels', 9))
+    delta_channels = not args.no_delta_channels
+    in_ch  = int(attrs.get('n_channels', 9)) + (2 if delta_channels else 0)
     height = int(attrs.get('height', attrs.get('max_reads', 30) + 1))
     W      = int(attrs.get('W', 21))
     L      = int(attrs.get('L', 10))
     print(f"Tensor shape per sample: ({height} × {W*L} × {in_ch})  [H × W × C]",
           file=sys.stderr)
     print(f"  (row 0 = reference track, rows 1-{height-1} = reads)", file=sys.stderr)
+    print(f"  delta channels: {'enabled (ch9+ch10)' if delta_channels else 'disabled'}",
+          file=sys.stderr)
 
     # ── leakage-safe split ────────────────────────────────────────────────────
     split_fn = (split_contig_groups
@@ -1172,11 +1227,14 @@ def main():
     train_ds = PileupDataset(h5_paths, train_idx, file_sizes,
                               augment=True,  seed=args.seed,
                               rc_augment=args.rc_augment,
-                              signal_noise_std=args.signal_noise_std)
+                              signal_noise_std=args.signal_noise_std,
+                              delta_channels=delta_channels)
     val_ds   = PileupDataset(h5_paths, val_idx,   file_sizes,
-                              augment=False, seed=args.seed)
+                              augment=False, seed=args.seed,
+                              delta_channels=delta_channels)
     test_ds  = PileupDataset(h5_paths, test_idx,  file_sizes,
-                              augment=False, seed=args.seed)
+                              augment=False, seed=args.seed,
+                              delta_channels=delta_channels)
 
     train_labels = labels[train_idx]
 
@@ -1300,9 +1358,24 @@ def main():
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.5, patience=7, min_lr=1e-6)
 
+        # Linear LR warmup: ramp from ~0 to args.lr over lr_warmup_steps steps,
+        # then hand off to ReduceLROnPlateau for epoch-level decay.
+        warmup_sched = None
+        if args.lr_warmup_steps > 0:
+            warmup_sched = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1.0 / max(args.lr_warmup_steps, 1),
+                end_factor=1.0,
+                total_iters=args.lr_warmup_steps,
+            )
+            print(f"LR warmup: {args.lr_warmup_steps} steps  "
+                  f"({args.lr_warmup_steps / max(len(train_loader), 1):.1f} epochs)",
+                  file=sys.stderr)
+
         best_auprc     = -1.0
         best_epoch     = 1
         patience_count = 0
+        global_step    = 0
         train_losses, val_losses, val_auprcs = [], [], []
         start_epoch = 1
         state_path = main_training_state_path(out_dir)
@@ -1320,7 +1393,10 @@ def main():
                 train_losses = list(state.get('train_losses', []))
                 val_losses = list(state.get('val_losses', []))
                 val_auprcs = list(state.get('val_auprcs', []))
+                global_step = int(state.get('global_step', 0))
                 start_epoch = int(state['epoch']) + 1
+                if warmup_sched is not None and 'warmup_sched_state' in state:
+                    warmup_sched.load_state_dict(state['warmup_sched_state'])
                 print(f"\n[RESUME] Continuing main training from "
                       f"epoch {start_epoch}/{args.epochs} "
                       f"(best epoch {best_epoch}, AUPRC={best_auprc:.4f})",
@@ -1332,6 +1408,7 @@ def main():
                 best_auprc = -1.0
                 best_epoch = 1
                 patience_count = 0
+                global_step = 0
                 train_losses, val_losses, val_auprcs = [], [], []
                 start_epoch = 1
 
@@ -1366,6 +1443,10 @@ def main():
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+                global_step += 1
+                # Step warmup scheduler per batch until warmup is complete.
+                if warmup_sched is not None and global_step <= args.lr_warmup_steps:
+                    warmup_sched.step()
                 epoch_loss += loss.item() * len(y)
                 epoch_seen += len(y)
                 if args.log_every > 0 and (
@@ -1393,7 +1474,9 @@ def main():
             val_losses.append(val_loss)
             val_auprcs.append(val_auprc)
 
-            scheduler.step(val_auprc)
+            # ReduceLROnPlateau only takes over once warmup is complete.
+            if warmup_sched is None or global_step > args.lr_warmup_steps:
+                scheduler.step(val_auprc)
             current_lr = optimizer.param_groups[0]['lr']
 
             print(f"Epoch {epoch:3d}/{args.epochs}  "
@@ -1430,6 +1513,8 @@ def main():
                 val_auprcs=val_auprcs,
                 args=args,
                 in_ch=in_ch,
+                global_step=global_step,
+                warmup_sched=warmup_sched,
             )
 
             if patience_count >= args.patience:
@@ -1663,6 +1748,8 @@ def main():
                 rc_augment=args.rc_augment,
                 signal_noise_std=args.signal_noise_std,
                 resume=resume,
+                delta_channels=delta_channels,
+                lr_warmup_steps=args.lr_warmup_steps,
             )
             # Write the per-fold sentinel immediately so a crash after this
             # fold does not force it to rerun.

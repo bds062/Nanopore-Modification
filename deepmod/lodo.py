@@ -74,8 +74,10 @@ def _save_lodo_state(
     train_losses: list[float],
     val_losses: list[float],
     val_auprcs: list[float],
+    global_step: int = 0,
+    warmup_sched=None,
 ) -> None:
-    torch.save({
+    state = {
         'held_out': held_out_name,
         'epoch': int(epoch),
         'model_state': model.state_dict(),
@@ -87,7 +89,11 @@ def _save_lodo_state(
         'train_losses': list(train_losses),
         'val_losses': list(val_losses),
         'val_auprcs': list(val_auprcs),
-    }, path)
+        'global_step': int(global_step),
+    }
+    if warmup_sched is not None:
+        state['warmup_sched_state'] = warmup_sched.state_dict()
+    torch.save(state, path)
 
 
 # ── dataset name helper ───────────────────────────────────────────────────────
@@ -332,6 +338,8 @@ def run_lodo(
     rc_augment:     bool  = False,
     signal_noise_std: float = 0.05,
     resume:         bool  = True,
+    delta_channels: bool  = True,
+    lr_warmup_steps: int  = 0,
 ) -> dict:
     """
     Train on every HDF5 file except ``held_out_path``.
@@ -384,7 +392,7 @@ def run_lodo(
     # Test set = all positions in the held-out file
     test_idx = np.arange(len(test_labels_full), dtype=np.int64)
 
-    in_ch  = int(attrs.get('n_channels', 9))
+    in_ch  = int(attrs.get('n_channels', 9)) + (2 if delta_channels else 0)
     height = int(attrs.get('height', attrs.get('max_reads', 30) + 1))
     W      = int(attrs.get('W', 21))
     L      = int(attrs.get('L', 10))
@@ -400,11 +408,14 @@ def run_lodo(
     train_ds = PileupDataset(train_paths, train_idx, train_file_sizes,
                               augment=True,  seed=seed,
                               rc_augment=rc_augment,
-                              signal_noise_std=signal_noise_std)
+                              signal_noise_std=signal_noise_std,
+                              delta_channels=delta_channels)
     val_ds   = PileupDataset(train_paths, val_idx,   train_file_sizes,
-                              augment=False, seed=seed)
+                              augment=False, seed=seed,
+                              delta_channels=delta_channels)
     test_ds  = PileupDataset([held_out_path], test_idx, test_file_sizes,
-                              augment=False, seed=seed)
+                              augment=False, seed=seed,
+                              delta_channels=delta_channels)
 
     train_labels_split = train_labels_all[train_idx]
     sampler = None if no_oversample else make_sampler(train_labels_split)
@@ -460,9 +471,19 @@ def run_lodo(
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=7, min_lr=1e-6)
 
+    warmup_sched = None
+    if lr_warmup_steps > 0:
+        warmup_sched = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0 / max(lr_warmup_steps, 1),
+            end_factor=1.0,
+            total_iters=lr_warmup_steps,
+        )
+
     best_auprc     = -1.0
     best_epoch     = 1
     patience_count = 0
+    global_step    = 0
     best_state     = None
     train_losses, val_losses, val_auprcs = [], [], []
     start_epoch = 1
@@ -482,7 +503,10 @@ def run_lodo(
                 train_losses = list(state.get('train_losses', []))
                 val_losses = list(state.get('val_losses', []))
                 val_auprcs = list(state.get('val_auprcs', []))
+                global_step = int(state.get('global_step', 0))
                 start_epoch = int(state['epoch']) + 1
+                if warmup_sched is not None and 'warmup_sched_state' in state:
+                    warmup_sched.load_state_dict(state['warmup_sched_state'])
                 print(f"  [RESUME] Continuing LODO '{held_out_name}' from "
                       f"epoch {start_epoch}/{epochs} "
                       f"(best epoch {best_epoch}, AUPRC={best_auprc:.4f})",
@@ -514,6 +538,9 @@ def run_lodo(
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            global_step += 1
+            if warmup_sched is not None and global_step <= lr_warmup_steps:
+                warmup_sched.step()
             epoch_loss += loss.item() * len(y)
         train_loss = epoch_loss / len(train_ds)
 
@@ -540,7 +567,8 @@ def run_lodo(
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         val_auprcs.append(val_auprc)
-        scheduler.step(val_auprc)
+        if warmup_sched is None or global_step > lr_warmup_steps:
+            scheduler.step(val_auprc)
 
         # ReduceLROnPlateau has no get_last_lr() — read directly from optimizer
         current_lr = optimizer.param_groups[0]['lr']
@@ -575,6 +603,8 @@ def run_lodo(
             train_losses=train_losses,
             val_losses=val_losses,
             val_auprcs=val_auprcs,
+            global_step=global_step,
+            warmup_sched=warmup_sched,
         )
 
         if patience_count >= patience:
