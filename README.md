@@ -103,6 +103,17 @@ On the UMD cluster, submit:
 sbatch scripts/slurm/train_deepmod.sbatch
 ```
 
+To train on the local `results9/*.h5` tensors with a contig-level holdout and
+write the run to `results10/`, submit:
+
+```bash
+sbatch scripts/slurm/train_deepmod_results10_contig_split.sbatch
+```
+
+That script runs `deepmod.model` with `--split-mode contig`, `--test-frac 0.30`,
+and `--val-frac 0.10`. All images from the same reference contig are assigned to
+one split only, so the final test metrics are measured on held-out contigs.
+
 ## Replot Existing Results
 
 ```bash

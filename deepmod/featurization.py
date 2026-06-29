@@ -78,6 +78,7 @@ Usage
 import os
 import sys
 import argparse
+from pathlib import Path
 import collections
 
 import numpy as np
@@ -115,16 +116,16 @@ BASE_ONEHOT = {
 
 def get_pod5_readers(pod5_path: str) -> dict:
     read_reader_map = {}
-    if pod5_path.endswith('.pod5'):
+    p = Path(pod5_path)
+    if p.suffix == '.pod5':
         reader = pod5.Reader(pod5_path)
         for rid in reader.read_ids:
             read_reader_map[str(rid)] = reader
         return read_reader_map
-    for fname in os.listdir(pod5_path):
-        if fname.endswith('.pod5'):
-            reader = pod5.Reader(os.path.join(pod5_path, fname))
-            for rid in reader.read_ids:
-                read_reader_map[str(rid)] = reader
+    for pod5_file in sorted(p.rglob('*.pod5')):
+        reader = pod5.Reader(str(pod5_file))
+        for rid in reader.read_ids:
+            read_reader_map[str(rid)] = reader
     return read_reader_map
 
 
@@ -523,6 +524,26 @@ def make_read_record(seg_dict: dict, bam_read) -> dict:
     }
 
 
+def trim_segments_to_window(seg_dict: dict, center_pos: int, half_window: int) -> dict:
+    """Keep only the local pileup window needed for one candidate position."""
+    lo = center_pos - half_window
+    hi = center_pos + half_window
+    return {pos: entry for pos, entry in seg_dict.items() if lo <= pos <= hi}
+
+
+def parse_target_bases(target_base: str = None, target_bases: str = None) -> set:
+    """Return uppercase reference bases to retain, or an empty set for all bases."""
+    bases = set()
+    for value in (target_base, target_bases):
+        if not value:
+            continue
+        for token in value.replace(',', ' ').split():
+            for char in token.upper():
+                if char in BASE_ONEHOT:
+                    bases.add(char)
+    return bases
+
+
 def sort_reads_for_pileup(read_list: list) -> list:
     """Sort read rows by haplotype, then alignment start."""
     return sorted(
@@ -613,6 +634,11 @@ def main():
     parser.add_argument('--target-base', default=None,
                         help='Only featurize positions where ref_base matches '
                              'this character, e.g. A for m6A (default: all bases)')
+    parser.add_argument('--target-bases', default=None,
+                        help='Only retain candidate positions with these reference '
+                             'bases. Accepts a string like AC or comma/space-separated '
+                             'bases. This is applied during read collection to reduce '
+                             'memory use (default: all bases).')
     parser.add_argument('--level-table', default=None,
                         help='K-mer level table (TSV: kmer\\tmean). When supplied, '
                              'the reference row (row 0) encodes expected kmer levels '
@@ -622,10 +648,37 @@ def main():
                              '(auto-detected from 50 reads if not set).')
     parser.add_argument('--seed',        type=int, default=42,
                         help='RNG seed for read subsampling (default: 42)')
+    parser.add_argument('--sample-n-sites', type=int, default=None,
+                        help='After collecting eligible positions, randomly sample at '
+                             'most this many sites. Sampling is weighted: A and C '
+                             'positions get 3× the probability of G/T positions '
+                             '(reflects where modifications occur). (default: all sites)')
+    parser.add_argument('--uniform-sampling', action='store_true',
+                        help='When --sample-n-sites is set, use equal probability for all '
+                             'base types instead of the default A/C 3× bias over G/T.')
+    parser.add_argument('--candidate-bed', default=None,
+                        help='BED file of candidate sites (high-confidence positives AND '
+                             'negatives). Only positions present in this BED are emitted. '
+                             'Use this for biological datasets to avoid mislabeling '
+                             'ambiguous/unobserved sites as negative. (default: all '
+                             'eligible positions are emitted)')
     args = parser.parse_args()
 
     if args.max_images_per_base is not None and args.max_images_per_base < 1:
         parser.error('--max-images-per-base must be >= 1 when set')
+    max_retained_reads_per_pos = None
+    if args.max_images_per_base is not None:
+        max_retained_reads_per_pos = args.max_reads * args.max_images_per_base
+        if max_retained_reads_per_pos < args.min_reads:
+            parser.error('--max-reads * --max-images-per-base must be >= --min-reads')
+
+    target_bases = parse_target_bases(args.target_base, args.target_bases)
+    if target_bases:
+        print(f"Target reference bases retained during collection: "
+              f"{''.join(sorted(target_bases))}", file=sys.stderr)
+    if max_retained_reads_per_pos is not None:
+        print(f"Retaining at most {max_retained_reads_per_pos:,} reads per "
+              f"reference position before tensor construction", file=sys.stderr)
 
     rng = np.random.default_rng(args.seed)
 
@@ -721,6 +774,7 @@ def main():
     # pos_reads[(ref_name, ref_pos)]    = list of seg_dicts
     # pos_ref_context[(ref_name)]       = dict of ref_pos -> base (all covered pos)
     pos_reads      = collections.defaultdict(list)
+    pos_read_counts = collections.defaultdict(int)
     pos_refbase    = {}    # (ref_name, ref_pos) -> base char
     pos_ref_context = collections.defaultdict(dict)  # ref_name -> {ref_pos: base}
 
@@ -757,15 +811,42 @@ def main():
 
             seg_dict = extract_base_segments(
                 signal, peaks, ref_seq, ref_positions, args.L, mapq, strand)
-            read_record = make_read_record(seg_dict, bam_read)
 
             for rpos, entry in seg_dict.items():
+                ref_base = entry['base'].upper()
+                # Accumulate full reference context even when candidate centers
+                # are base-filtered; reference rows still need neighboring bases.
+                pos_ref_context[ref_name][rpos] = ref_base
+                if target_bases and ref_base not in target_bases:
+                    continue
+
                 key = (ref_name, rpos)
-                pos_reads[key].append(read_record)
                 if key not in pos_refbase:
-                    pos_refbase[key] = entry['base']
-                # Accumulate reference base context for reference row construction
-                pos_ref_context[ref_name][rpos] = entry['base']
+                    pos_refbase[key] = ref_base
+
+                pos_read_counts[key] += 1
+                keep_index = None
+                if max_retained_reads_per_pos is None:
+                    keep_index = len(pos_reads[key])
+                elif len(pos_reads[key]) < max_retained_reads_per_pos:
+                    keep_index = len(pos_reads[key])
+                else:
+                    # Reservoir sample so high-coverage positions do not keep
+                    # every read in memory while still sampling across coverage.
+                    j = int(rng.integers(pos_read_counts[key]))
+                    if j < max_retained_reads_per_pos:
+                        keep_index = j
+
+                if keep_index is None:
+                    continue
+
+                local_segments = trim_segments_to_window(
+                    seg_dict, rpos, args.half_window)
+                read_record = make_read_record(local_segments, bam_read)
+                if keep_index == len(pos_reads[key]):
+                    pos_reads[key].append(read_record)
+                else:
+                    pos_reads[key][keep_index] = read_record
 
             n_eval += 1
 
@@ -778,20 +859,57 @@ def main():
     print(f"\nReads evaluated: {n_eval:,}  skipped: {n_skip:,}", file=sys.stderr)
 
     # ── pass 2: build tensors for eligible positions ──────────────────────────
-    eligible = {k: v for k, v in pos_reads.items() if len(v) >= args.min_reads}
-    if args.target_base:
-        tb = args.target_base.upper()
+    eligible = {k: v for k, v in pos_reads.items()
+                if pos_read_counts.get(k, len(v)) >= args.min_reads
+                and len(v) >= args.min_reads}
+    if target_bases:
         eligible = {k: v for k, v in eligible.items()
-                    if pos_refbase.get(k, 'N').upper() == tb}
+                    if pos_refbase.get(k, 'N').upper() in target_bases}
 
     print(f"Eligible positions: {len(eligible):,}  "
           f"(>= {args.min_reads} reads"
-          + (f", ref_base={args.target_base}" if args.target_base else "")
+          + (f", ref_base in {''.join(sorted(target_bases))}" if target_bases else "")
           + ")", file=sys.stderr)
+    if max_retained_reads_per_pos is not None:
+        print(f"Maximum retained reads per eligible position: "
+              f"{max_retained_reads_per_pos:,}", file=sys.stderr)
 
     if not eligible:
         print("No eligible positions found — nothing to write.", file=sys.stderr)
         sys.exit(1)
+
+    # ── candidate-bed filter: restrict to known high-confidence sites ─────────
+    if args.candidate_bed:
+        candidate_set = load_gt(args.candidate_bed)
+        before = len(eligible)
+        eligible = {k: v for k, v in eligible.items() if k in candidate_set}
+        print(f"Candidate-bed filter: {before:,} → {len(eligible):,} positions "
+              f"({len(candidate_set):,} sites in BED)", file=sys.stderr)
+        if not eligible:
+            print("No positions remain after candidate-bed filter — nothing to write.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    # ── site sampling ─────────────────────────────────────────────────────────
+    _BASE_WEIGHTS_BIASED   = {'A': 3.0, 'C': 3.0, 'G': 1.0, 'T': 1.0}
+    _BASE_WEIGHTS_UNIFORM  = {'A': 1.0, 'C': 1.0, 'G': 1.0, 'T': 1.0}
+    sorted_keys = sorted(eligible.keys(), key=lambda k: (k[0], k[1]))
+
+    if args.sample_n_sites is not None and len(sorted_keys) > args.sample_n_sites:
+        _bw = _BASE_WEIGHTS_UNIFORM if args.uniform_sampling else _BASE_WEIGHTS_BIASED
+        weights = np.array([
+            _bw.get(pos_refbase.get(k, 'N').upper(), 1.0)
+            for k in sorted_keys
+        ], dtype=np.float64)
+        weights /= weights.sum()
+        sampled_idx = rng.choice(len(sorted_keys), size=args.sample_n_sites,
+                                 replace=False, p=weights)
+        sampled_idx.sort()
+        sorted_keys = [sorted_keys[i] for i in sampled_idx]
+        eligible = {k: eligible[k] for k in sorted_keys}
+        bias_note = "uniform" if args.uniform_sampling else "A/C bias 3:1 vs G/T"
+        print(f"Sampled {len(eligible):,} / {len(pos_reads):,} eligible positions "
+              f"({bias_note})", file=sys.stderr)
 
     # Pre-compute image partitions for every position so we know total N_images
     # before allocating the output arrays.

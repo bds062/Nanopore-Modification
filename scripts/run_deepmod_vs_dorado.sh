@@ -59,6 +59,7 @@ Optional:
   --min-reads INT            Minimum reads per DeepMod pileup position. Default: 5.
   --max-reads INT            Reads per DeepMod pileup image. Default: 30.
   --max-images-per-base INT  DeepMod image cap per reference position. Default: 5.
+  --target-bases BASES       Reference bases to featurize for DeepMod. Default: AC.
   --force                    Recompute existing outputs.
   -h, --help                 Show this help.
 
@@ -142,6 +143,7 @@ MIN_CALLS=1
 MIN_READS=5
 MAX_READS=30
 MAX_IMAGES_PER_BASE=5
+TARGET_BASES="AC"
 FORCE=0
 ALL_COMPATIBLE=0
 MOD_MODELS=()
@@ -173,6 +175,7 @@ while [[ $# -gt 0 ]]; do
     --min-reads) MIN_READS=$2; shift 2 ;;
     --max-reads) MAX_READS=$2; shift 2 ;;
     --max-images-per-base) MAX_IMAGES_PER_BASE=$2; shift 2 ;;
+    --target-bases) TARGET_BASES=$2; shift 2 ;;
     --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "Unknown argument: $1" ;;
@@ -210,6 +213,54 @@ if [[ -z "$DEEPMOD_DEVICE" ]]; then
 fi
 mkdir -p "$OUT_DIR"
 
+stage_reference() {
+  local src="$1"
+  local dst_dir="$OUT_DIR/reference"
+  local dst="$dst_dir/$(basename "$src")"
+  local src_real
+  local dst_real
+
+  mkdir -p "$dst_dir"
+  src_real=$(readlink -f "$src")
+  dst_real=$(readlink -f "$dst" 2>/dev/null || printf '%s' "$dst")
+
+  if [[ "$src_real" != "$dst_real" ]]; then
+    if [[ "$FORCE" == "1" || ! -f "$dst" || "$src" -nt "$dst" ]]; then
+      echo "[$DATASET] staging writable reference: $dst" >&2
+      cp -f "$src" "$dst"
+    fi
+  fi
+
+  if [[ "$FORCE" == "1" || ! -f "$dst.fai" ]]; then
+    echo "[$DATASET] indexing staged reference: $dst.fai" >&2
+    if command -v samtools >/dev/null 2>&1; then
+      samtools faidx "$dst"
+    else
+      "$PYTHON" -c 'import pysam, sys; pysam.faidx(sys.argv[1])' "$dst"
+    fi
+  fi
+
+  printf '%s\n' "$dst"
+}
+
+bam_is_readable() {
+  local bam="$1"
+  [[ -s "$bam" ]] || return 1
+  "$PYTHON" -c '
+import pysam
+import sys
+
+try:
+    with pysam.AlignmentFile(sys.argv[1], "rb") as handle:
+        next(handle.fetch(until_eof=True), None)
+except Exception as exc:
+    print(f"{sys.argv[1]} is not a readable BAM: {exc}", file=sys.stderr)
+    sys.exit(1)
+' "$bam" >/dev/null
+}
+
+DORADO_REFERENCE=$(stage_reference "$REFERENCE")
+
 if [[ "${#MOD_MODELS[@]}" -eq 0 ]]; then
   BASE_MODEL_NAME=$(basename "$DORADO_MODEL")
   DISCOVERY_MODE="latest"
@@ -225,12 +276,17 @@ echo "  dataset:          $DATASET"
 echo "  pod5:             $POD5"
 echo "  deepmod bam:      $BAM"
 echo "  reference:        $REFERENCE"
+echo "  dorado reference: $DORADO_REFERENCE"
 echo "  output:           $OUT_DIR"
 echo "  dorado binary:    $DORADO_BIN"
 echo "  dorado model:     $DORADO_MODEL"
 echo "  dorado threshold: $DORADO_THRESHOLD"
 echo "  dorado emit thr.: $DORADO_EMIT_THRESHOLD"
 echo "  deepmod threshold:$DEEPMOD_THRESHOLD"
+echo "  deepmod min reads:$MIN_READS"
+echo "  deepmod max reads:$MAX_READS"
+echo "  images per base:  $MAX_IMAGES_PER_BASE"
+echo "  target bases:     ${TARGET_BASES:-all}"
 echo "  mod models:"
 printf '    %s\n' "${MOD_MODELS[@]}"
 
@@ -255,6 +311,7 @@ if [[ -z "$DEEPMOD_PREDICTIONS" ]]; then
   if [[ -n "$PEAKS" ]]; then deepmod_cmd+=(--peaks "$PEAKS"); fi
   if [[ -n "$MOVES" ]]; then deepmod_cmd+=(--moves "$MOVES"); fi
   if [[ -n "$LEVEL_TABLE" ]]; then deepmod_cmd+=(--level-table "$LEVEL_TABLE"); fi
+  if [[ -n "$TARGET_BASES" ]]; then deepmod_cmd+=(--target-bases "$TARGET_BASES"); fi
   if [[ "$FORCE" == "1" ]]; then deepmod_cmd+=(--force); fi
   echo "[$DATASET] running DeepMod pipeline"
   "${deepmod_cmd[@]}"
@@ -275,20 +332,40 @@ for MOD_MODEL in "${MOD_MODELS[@]}"; do
   DORADO_BAM="$MODEL_OUT/reads.bam"
   mkdir -p "$MODEL_OUT" "$MODEL_COMPARISON" "$MODEL_OUT/logs"
 
-  if [[ "$FORCE" == "1" || ! -f "$DORADO_BAM" ]]; then
+  DORADO_BAM_READY=0
+  if [[ "$FORCE" != "1" ]] && bam_is_readable "$DORADO_BAM"; then
+    DORADO_BAM_READY=1
+  elif [[ -e "$DORADO_BAM" ]]; then
+    echo "[$DATASET] existing Dorado BAM is missing or unreadable and will be replaced: $DORADO_BAM"
+  fi
+
+  if [[ "$DORADO_BAM_READY" != "1" ]]; then
+    DORADO_TMP="$DORADO_BAM.tmp.$$"
     dorado_cmd=("$DORADO_BIN" basecaller)
     if [[ "$DEVICE" != "auto" ]]; then dorado_cmd+=("-x" "$DEVICE"); fi
     dorado_cmd+=(
       --emit-moves
       --disable-read-splitting
-      --reference "$REFERENCE"
+      --reference "$DORADO_REFERENCE"
       --modified-bases-models "$MOD_MODEL"
       --modified-bases-threshold "$DORADO_EMIT_THRESHOLD"
       "$DORADO_MODEL"
       "$POD5"
     )
     echo "[$DATASET] running Dorado model: $MODEL_NAME"
-    /usr/bin/time -vpo "$MODEL_OUT/basecall.time" "${dorado_cmd[@]}" > "$DORADO_BAM" 2> "$MODEL_OUT/logs/basecall.err"
+    status=0
+    /usr/bin/time -vpo "$MODEL_OUT/basecall.time" "${dorado_cmd[@]}" > "$DORADO_TMP" 2> "$MODEL_OUT/logs/basecall.err" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      echo "ERROR: Dorado failed for $MODEL_NAME (exit $status)." >&2
+      echo "Log: $MODEL_OUT/logs/basecall.err" >&2
+      tail -80 "$MODEL_OUT/logs/basecall.err" >&2 || true
+      exit "$status"
+    fi
+    mv -f "$DORADO_TMP" "$DORADO_BAM"
+    if ! bam_is_readable "$DORADO_BAM"; then
+      echo "ERROR: Dorado produced an unreadable BAM: $DORADO_BAM" >&2
+      exit 1
+    fi
   else
     echo "[$DATASET] using existing Dorado BAM: $DORADO_BAM"
   fi
@@ -305,7 +382,7 @@ for MOD_MODEL in "${MOD_MODELS[@]}"; do
         --dataset "$DATASET" \
         --mod-model-name "$MODEL_NAME" \
         --mod-type "$MOD_TYPE" \
-        --reference "$REFERENCE" \
+        --reference "$DORADO_REFERENCE" \
         --output "$LABELS" \
         --threshold "$DORADO_THRESHOLD" \
         --min-mapq "$MIN_MAPQ" \
@@ -352,6 +429,7 @@ Generated by \`scripts/run_deepmod_vs_dorado.sh\`.
 - peaks: \`${PEAKS:-none}\`
 - moves: \`${MOVES:-none}\`
 - reference FASTA: \`$REFERENCE\`
+- Dorado staged reference: \`$DORADO_REFERENCE\`
 - DeepMod checkpoint: \`${DEEPMOD_MODEL:-reused predictions}\`
 - DeepMod predictions: \`$DEEPMOD_PREDICTIONS\`
 - Dorado binary: \`$DORADO_BIN\`
@@ -359,6 +437,10 @@ Generated by \`scripts/run_deepmod_vs_dorado.sh\`.
 - Dorado label threshold: \`$DORADO_THRESHOLD\`
 - Dorado MM/ML emission threshold: \`$DORADO_EMIT_THRESHOLD\`
 - DeepMod threshold: \`$DEEPMOD_THRESHOLD\`
+- DeepMod min reads: \`$MIN_READS\`
+- DeepMod max reads: \`$MAX_READS\`
+- DeepMod max images per base: \`$MAX_IMAGES_PER_BASE\`
+- DeepMod target bases: \`${TARGET_BASES:-all}\`
 
 ## Outputs
 

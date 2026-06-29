@@ -594,38 +594,25 @@ def make_position_keys(ref_names: np.ndarray, ref_pos: np.ndarray) -> list[tuple
     return list(zip(names, ref_pos.astype(np.int64).tolist()))
 
 
-def split_position_groups(labels: np.ndarray,
-                          position_keys: list[tuple],
-                          val_frac: float,
-                          test_frac: float,
-                          seed: int):
-    """
-    Stratify train/val/test by unique genomic position, then expand to images.
-
-    All images with the same (ref_name, ref_pos) stay in one split.  If the
-    same coordinate appears in multiple input files, those images stay together
-    too, which prevents sequence/context leakage across splits.
-    """
-    group_to_indices: dict[tuple, list[int]] = {}
-    group_to_label: dict[tuple, int] = {}
-    for i, key in enumerate(position_keys):
-        group_to_indices.setdefault(key, []).append(i)
-        group_to_label[key] = max(group_to_label.get(key, 0), int(labels[i] > 0))
-
+def _split_group_keys(group_to_label: dict,
+                      val_frac: float,
+                      test_frac: float,
+                      seed: int):
+    """Stratify a list of leakage-safe groups into train/val/test keys."""
     by_label = {
         0: [k for k, v in group_to_label.items() if v == 0],
         1: [k for k, v in group_to_label.items() if v == 1],
     }
     rng = np.random.default_rng(seed)
 
-    def split_keys(keys: list[tuple]):
+    def split_keys(keys: list):
         keys = list(keys)
         rng.shuffle(keys)
         n = len(keys)
         if n == 0:
             return [], [], []
-        n_test = int(n * test_frac)
-        n_val = int(n * val_frac)
+        n_test = int(round(n * test_frac))
+        n_val = int(round(n * val_frac))
         if test_frac > 0 and n_test == 0 and n >= 3:
             n_test = 1
         if val_frac > 0 and n_val == 0 and n - n_test >= 2:
@@ -647,6 +634,34 @@ def split_position_groups(labels: np.ndarray,
         val_keys.extend(va)
         test_keys.extend(te)
 
+    return train_keys, val_keys, test_keys
+
+
+def split_position_groups(labels: np.ndarray,
+                          position_keys: list[tuple],
+                          val_frac: float,
+                          test_frac: float,
+                          seed: int):
+    """
+    Stratify train/val/test by unique genomic position, then expand to images.
+
+    All images with the same (ref_name, ref_pos) stay in one split.  If the
+    same coordinate appears in multiple input files, those images stay together
+    too, which prevents sequence/context leakage across splits.
+    """
+    group_to_indices: dict[tuple, list[int]] = {}
+    group_to_label: dict[tuple, int] = {}
+    for i, key in enumerate(position_keys):
+        group_to_indices.setdefault(key, []).append(i)
+        group_to_label[key] = max(group_to_label.get(key, 0), int(labels[i] > 0))
+
+    train_keys, val_keys, test_keys = _split_group_keys(
+        group_to_label=group_to_label,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+    )
+
     def expand(keys: list[tuple]) -> np.ndarray:
         idx = []
         for key in keys:
@@ -659,6 +674,60 @@ def split_position_groups(labels: np.ndarray,
         'test_positions':  len(test_keys),
     }
     return expand(train_keys), expand(val_keys), expand(test_keys), stats
+
+
+def split_contig_groups(labels: np.ndarray,
+                        position_keys: list[tuple],
+                        val_frac: float,
+                        test_frac: float,
+                        seed: int):
+    """
+    Stratify train/val/test by reference contig, then expand to images.
+
+    This is stricter than the position-level split: every image from a contig
+    is assigned to exactly one split across all input HDF5 files.  It is useful
+    when the desired evaluation is generalization to unseen contigs rather than
+    unseen individual reference bases.
+    """
+    group_to_indices: dict[str, list[int]] = {}
+    group_to_label: dict[str, int] = {}
+    for i, key in enumerate(position_keys):
+        contig = str(key[0])
+        group_to_indices.setdefault(contig, []).append(i)
+        group_to_label[contig] = max(
+            group_to_label.get(contig, 0),
+            int(labels[i] > 0),
+        )
+
+    train_keys, val_keys, test_keys = _split_group_keys(
+        group_to_label=group_to_label,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+    )
+
+    def expand(keys: list[str]) -> np.ndarray:
+        idx = []
+        for key in keys:
+            idx.extend(group_to_indices[key])
+        return np.array(idx, dtype=np.int64)
+
+    train_idx = expand(train_keys)
+    val_idx = expand(val_keys)
+    test_idx = expand(test_keys)
+
+    def n_positions(indices: np.ndarray) -> int:
+        return len({position_keys[int(i)] for i in indices})
+
+    stats = {
+        'train_contigs': len(train_keys),
+        'val_contigs':   len(val_keys),
+        'test_contigs':  len(test_keys),
+        'train_positions': n_positions(train_idx),
+        'val_positions':   n_positions(val_idx),
+        'test_positions':  n_positions(test_idx),
+    }
+    return train_idx, val_idx, test_idx, stats
 
 
 def source_position_keys(global_indices: np.ndarray,
@@ -968,6 +1037,11 @@ def main():
     parser.add_argument('--weight-decay', type=float, default=1e-3)
     parser.add_argument('--val-frac',    type=float, default=0.15)
     parser.add_argument('--test-frac',   type=float, default=0.15)
+    parser.add_argument('--split-mode', choices=('position', 'contig'),
+                        default='position',
+                        help='Leakage-safe split unit. "position" keeps all '
+                             'images from a reference base together; "contig" '
+                             'keeps all images from a reference contig together.')
     parser.add_argument('--patience',    type=int,   default=15)
     parser.add_argument('--dropout',     type=float, default=0.4)
     parser.add_argument('--focal',       action='store_true',
@@ -1010,6 +1084,12 @@ def main():
     parser.add_argument('--skip-lodo', action='store_true',
                         help='Skip leave-one-dataset-out retraining after the '
                              'main model finishes.')
+    parser.add_argument('--lodo-held-out', default=None, metavar='STEM',
+                        help='Run only the LODO fold for this dataset stem '
+                             '(stem = HDF5 filename without extension). '
+                             'Requires best_model.pt + test_predictions.npz '
+                             'to exist in --out-dir. Skips final summary '
+                             'plots (run collect_lodo.py to regenerate them).')
     parser.add_argument('--seed',        type=int,   default=42)
     # ── resume control ────────────────────────────────────────────────────────
     parser.add_argument('--no-resume', action='store_true',
@@ -1055,8 +1135,11 @@ def main():
           file=sys.stderr)
     print(f"  (row 0 = reference track, rows 1-{height-1} = reads)", file=sys.stderr)
 
-    # ── stratified position-level split ───────────────────────────────────────
-    train_idx, val_idx, test_idx, split_stats = split_position_groups(
+    # ── leakage-safe split ────────────────────────────────────────────────────
+    split_fn = (split_contig_groups
+                if args.split_mode == 'contig'
+                else split_position_groups)
+    train_idx, val_idx, test_idx, split_stats = split_fn(
         labels=labels,
         position_keys=position_keys,
         val_frac=args.val_frac,
@@ -1071,6 +1154,11 @@ def main():
     test_base_keys, test_file_idx = source_position_keys(
         test_idx, position_keys, file_sizes)
 
+    print(f"Split mode: {args.split_mode}", file=sys.stderr)
+    if args.split_mode == 'contig':
+        print(f"Split contigs — train: {split_stats['train_contigs']:,}  "
+              f"val: {split_stats['val_contigs']:,}  "
+              f"test: {split_stats['test_contigs']:,}", file=sys.stderr)
     print(f"Split images — train: {len(train_idx):,}  "
           f"val: {len(val_idx):,}  test: {len(test_idx):,}", file=sys.stderr)
     print(f"Split reference bases — train: {split_stats['train_positions']:,}  "
@@ -1134,6 +1222,16 @@ def main():
 
     ckpt_path = out_dir / 'best_model.pt'
     pred_path = out_dir / 'test_predictions.npz'
+
+    if args.lodo_held_out and not (ckpt_path.exists() and pred_path.exists()):
+        print(f"ERROR: --lodo-held-out '{args.lodo_held_out}' requires "
+              f"best_model.pt and test_predictions.npz to exist in {out_dir}.\n"
+              f"Run main training first without --lodo-held-out "
+              f"(pass --skip-lodo to skip the sequential LODO).",
+              file=sys.stderr)
+        sys.exit(1)
+    if args.lodo_held_out:
+        args.skip_channel_importance = True
 
     # ══════════════════════════════════════════════════════════════════════════
     # STAGE 1 — Main training + test evaluation
@@ -1410,6 +1508,9 @@ def main():
                  test_file_idx=test_file_idx,
                  train_indices=train_idx,
                  val_indices=val_idx,
+                 split_mode=np.array(args.split_mode),
+                 split_stat_names=np.array(list(split_stats.keys())),
+                 split_stat_values=np.array(list(split_stats.values()), dtype=np.int64),
                  train_base_y_true=y_true_train_base,
                  train_base_y_prob=train_base_y_prob,
                  train_base_ref_names=train_base_ref_names,
@@ -1520,6 +1621,14 @@ def main():
             fold_sentinel = lodo_sentinel(out_dir, held_out_path)
             stem          = lodo_stem(held_out_path)
 
+            # When running a single fold in parallel, skip all other folds.
+            # Load their sentinels so the summary (if any) has all results.
+            if args.lodo_held_out and stem != args.lodo_held_out:
+                if resume and fold_sentinel.exists():
+                    result = load_lodo_result(out_dir, held_out_path)
+                    loo_results.append(result)
+                continue
+
             if resume and fold_sentinel.exists():
                 print(f"\n[RESUME] Skipping LODO fold '{stem}' — "
                       f"found {fold_sentinel.name}", file=sys.stderr)
@@ -1560,18 +1669,20 @@ def main():
             save_lodo_result(out_dir, held_out_path, result)
             loo_results.append(result)
 
-        plot_loo_results(
-            loo_results=loo_results,
-            main_metrics=main_metrics,
-            zeror_base=zeror_base,
-            out_path=str(out_dir / 'lodo_comparison.png'),
-        )
-        save_loo_metrics_tsv(
-            loo_results=loo_results,
-            main_metrics=main_metrics,
-            zeror_base=zeror_base,
-            out_path=str(out_dir / 'lodo_metrics.tsv'),
-        )
+        # Summary plots are written by collect_lodo.py when folds run in parallel.
+        if not args.lodo_held_out:
+            plot_loo_results(
+                loo_results=loo_results,
+                main_metrics=main_metrics,
+                zeror_base=zeror_base,
+                out_path=str(out_dir / 'lodo_comparison.png'),
+            )
+            save_loo_metrics_tsv(
+                loo_results=loo_results,
+                main_metrics=main_metrics,
+                zeror_base=zeror_base,
+                out_path=str(out_dir / 'lodo_metrics.tsv'),
+            )
     else:
         print("\nSkipping LODO evaluation: need >= 2 input files.", file=sys.stderr)
         loo_results = []
