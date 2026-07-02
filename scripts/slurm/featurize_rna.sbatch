@@ -27,8 +27,16 @@ python -c "import pod5, pysam, h5py, numpy, tqdm" || {
 
 DATA=${DATADIR:-/fs/nexus-scratch/vgandhi/rna_mod_validation}
 REF=$DATA/references
-OUT=$DATA/features_deepmod
+OUT=${FEATOUT:-$DATA/features_deepmod}
 mkdir -p $OUT
+
+# Featurization params (env-overridable so we can sweep without editing the file).
+MIN_MAPQ=${MIN_MAPQ:-20}
+MAX_IMAGES=${MAX_IMAGES:-5}
+MIN_READS=${MIN_READS:-5}
+MAX_READS=${MAX_READS:-30}
+HALF_WINDOW=${HALF_WINDOW:-10}
+L=${L:-10}
 
 CONDITIONS=(control_rep1 m6A_rep1 m5C_rep1 pseU_rep1 Inosine_rep1 \
             control_rep2 m6A_rep2 m5C_rep2 pseU_rep2 Inosine_rep2)
@@ -55,8 +63,9 @@ ARGS=(
   --peaks       $DATA/refined/${COND}_peaks_refined.tsv
   --level-table $REF/rna004_9mer_levels.tsv
   --normalize
-  --min-mapq    20
-  --half-window 10  --L 10  --max-reads 30  --max-images-per-base 5  --min-reads 5
+  --min-mapq    $MIN_MAPQ
+  --half-window $HALF_WINDOW  --L $L  --max-reads $MAX_READS
+  --max-images-per-base $MAX_IMAGES  --min-reads $MIN_READS
   --output      $OUT/${COND}.h5
 )
 if [[ -n "$GTBED" ]]; then
