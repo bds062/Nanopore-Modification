@@ -340,6 +340,8 @@ def run_lodo(
     resume:         bool  = True,
     delta_channels: bool  = True,
     lr_warmup_steps: int  = 0,
+    cross_read_attention: bool = False,
+    grad_clip: float = 1.0,
 ) -> dict:
     """
     Train on every HDF5 file except ``held_out_path``.
@@ -453,7 +455,11 @@ def run_lodo(
     test_loader  = DataLoader(test_ds, shuffle=False, **loader_kwargs)
 
     # ── model — fresh weights for each fold ───────────────────────────────────
-    model = PileupInceptionV3(in_channels=in_ch, dropout=dropout).to(device)
+    model = PileupInceptionV3(
+        in_channels=in_ch,
+        dropout=dropout,
+        cross_read_attention=cross_read_attention,
+    ).to(device)
 
     pw         = float(get_pos_weight(train_labels_split, device).item())
     pw_tensor  = torch.tensor(pw, device=device)
@@ -536,7 +542,8 @@ def run_lodo(
             optimizer.zero_grad()
             loss = criterion(model(x).squeeze(1), y)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            if grad_clip > 0:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             global_step += 1
             if warmup_sched is not None and global_step <= lr_warmup_steps:

@@ -346,7 +346,7 @@ class ConvBnRelu(nn.Module):
         self.block = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size,
                       stride=stride, padding=padding, bias=False),
-            nn.BatchNorm2d(out_ch, eps=1e-3, momentum=0.001),
+            nn.BatchNorm2d(out_ch, eps=1e-3, momentum=0.01),
             nn.ReLU(inplace=True),
         )
 
@@ -493,7 +493,8 @@ class PileupInceptionV3(nn.Module):
     Input : (B, 9, H, W)
     Output: (B, 1) logit
     """
-    def __init__(self, in_channels: int = 9, dropout: float = 0.4):
+    def __init__(self, in_channels: int = 9, dropout: float = 0.4,
+                 cross_read_attention: bool = False):
         super().__init__()
 
         self.stem = nn.Sequential(
@@ -514,6 +515,11 @@ class PileupInceptionV3(nn.Module):
         self.inceptionC2 = InceptionC(192, channels_7x7=40)
         self.inceptionC3 = InceptionC(192, channels_7x7=40)
         self.inceptionC4 = InceptionC(192, channels_7x7=48)
+        self.cross_read_attn = (
+            CrossReadAttention(72, num_heads=4)
+            if cross_read_attention else None
+        )
+
         self.inceptionD  = InceptionD(192)
         self.inceptionE1 = InceptionE(320)
         self.inceptionE2 = InceptionE(512)
@@ -545,6 +551,8 @@ class PileupInceptionV3(nn.Module):
         x = self.inceptionA1(x)
         x = self.inceptionA2(x)
         x = self.inceptionA3(x)
+        if self.cross_read_attn is not None:
+            x = self.cross_read_attn(x)
         x = self.inceptionB(x)
         x = self.inceptionC1(x)
         x = self.inceptionC2(x)
@@ -554,6 +562,34 @@ class PileupInceptionV3(nn.Module):
         x = self.inceptionE1(x)
         x = self.inceptionE2(x)
         return self.head(x)
+
+
+class CrossReadAttention(nn.Module):
+    """
+    Multi-head self-attention across the H (reads) dimension.
+
+    Inserted between InceptionA3 and InceptionB so reads can attend to each
+    other at the last pre-reduction resolution.  Each read row is summarised
+    by its mean feature vector (pooled over W); the attention output is
+    projected and added back residually, broadcasting over W.
+
+    Parameters are ~26K for C=72 / num_heads=4 — negligible overhead.
+    """
+    def __init__(self, channels: int, num_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+        self.attn = nn.MultiheadAttention(channels, num_heads, dropout=dropout,
+                                          batch_first=True)
+        self.proj = nn.Linear(channels, channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, H, W)
+        tokens = x.mean(dim=3).permute(0, 2, 1)       # (B, H, C)
+        tokens = self.norm(tokens)
+        attn_out, _ = self.attn(tokens, tokens, tokens)
+        attn_out = self.proj(attn_out)                 # (B, H, C)
+        residual = attn_out.permute(0, 2, 1).unsqueeze(3)  # (B, C, H, 1)
+        return x + residual
 
 
 PileupCNN = PileupInceptionV3   # alias for loo.py compatibility
@@ -1148,6 +1184,14 @@ def main():
                         help='Number of optimizer steps for linear LR warmup. '
                              'LR ramps from ~0 to --lr over this many steps '
                              'before ReduceLROnPlateau takes over. 0 disables.')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Max gradient norm for clipping before optimizer.step(). '
+                             '0 disables clipping. Default 1.0.')
+    parser.add_argument('--cross-read-attention', action='store_true',
+                        help='Add cross-read multi-head self-attention between '
+                             'InceptionA3 and InceptionB (~26K extra params). '
+                             'Lets reads attend to each other before the first '
+                             'grid reduction.')
     args = parser.parse_args()
 
     # Warn about bad combination
@@ -1272,7 +1316,11 @@ def main():
     test_loader  = DataLoader(test_ds,  shuffle=False, **loader_kwargs)
 
     # ── model (always instantiated; weights loaded from ckpt on resume) ───────
-    model = PileupInceptionV3(in_channels=in_ch, dropout=args.dropout).to(device)
+    model = PileupInceptionV3(
+        in_channels=in_ch,
+        dropout=args.dropout,
+        cross_read_attention=args.cross_read_attention,
+    ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: PileupInceptionV3 (scaled)  ({n_params:,} parameters)",
@@ -1441,7 +1489,8 @@ def main():
                 logits = model(x).squeeze(1)
                 loss   = criterion(logits, y)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                if args.grad_clip > 0:
+                    nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
                 global_step += 1
                 # Step warmup scheduler per batch until warmup is complete.
@@ -1489,11 +1538,12 @@ def main():
                 best_epoch     = epoch
                 patience_count = 0
                 torch.save({
-                    'epoch':       epoch,
-                    'model_state': model.state_dict(),
-                    'val_auprc':   val_auprc,
-                    'args':        vars(args),
-                    'in_channels': in_ch,
+                    'epoch':                epoch,
+                    'model_state':          model.state_dict(),
+                    'val_auprc':            val_auprc,
+                    'args':                 vars(args),
+                    'in_channels':          in_ch,
+                    'cross_read_attention': args.cross_read_attention,
                 }, ckpt_path)
                 print(f"  ✓ New best  AUPRC={best_auprc:.4f}  checkpoint saved")
             else:
@@ -1750,6 +1800,8 @@ def main():
                 resume=resume,
                 delta_channels=delta_channels,
                 lr_warmup_steps=args.lr_warmup_steps,
+                cross_read_attention=args.cross_read_attention,
+                grad_clip=args.grad_clip,
             )
             # Write the per-fold sentinel immediately so a crash after this
             # fold does not force it to rerun.
