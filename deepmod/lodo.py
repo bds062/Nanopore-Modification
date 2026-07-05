@@ -342,6 +342,9 @@ def run_lodo(
     lr_warmup_steps: int  = 0,
     cross_read_attention: bool = False,
     grad_clip: float = 1.0,
+    supcon_weight: float = 0.0,
+    supcon_temp:   float = 0.07,
+    supcon_proj_dim: int = 128,
 ) -> dict:
     """
     Train on every HDF5 file except ``held_out_path``.
@@ -419,12 +422,11 @@ def run_lodo(
                               augment=False, seed=seed,
                               delta_channels=delta_channels)
 
-    train_labels_split = train_labels_all[train_idx]
-    sampler = None if no_oversample else make_sampler(train_labels_split)
-
     dataset_mod = sys.modules.get(PileupDataset.__module__)
     _worker_init_fn = getattr(dataset_mod, '_worker_init_fn', None)
     FocalBCELoss = getattr(dataset_mod, 'FocalBCELoss', None)
+    SupConLoss_cls = getattr(dataset_mod, 'SupConLoss', None)
+    DatasetBalancedSampler_cls = getattr(dataset_mod, 'DatasetBalancedSampler', None)
     if FocalBCELoss is None:
         try:
             from .model import FocalBCELoss as _FocalBCELoss
@@ -435,6 +437,18 @@ def run_lodo(
                 FocalBCELoss = _FocalBCELoss
             except ImportError:
                 FocalBCELoss = None
+
+    train_labels_split = train_labels_all[train_idx]
+    if supcon_weight > 0 and DatasetBalancedSampler_cls is not None:
+        sampler = DatasetBalancedSampler_cls(
+            global_indices=train_idx,
+            file_sizes=train_file_sizes,
+            labels=train_labels_all,
+            num_samples=len(train_idx),
+            seed=seed,
+        )
+    else:
+        sampler = None if no_oversample else make_sampler(train_labels_split)
 
     loader_kwargs = _make_loader_kwargs(
         batch_size=batch,
@@ -459,6 +473,7 @@ def run_lodo(
         in_channels=in_ch,
         dropout=dropout,
         cross_read_attention=cross_read_attention,
+        supcon_proj_dim=supcon_proj_dim if supcon_weight > 0 else 0,
     ).to(device)
 
     pw         = float(get_pos_weight(train_labels_split, device).item())
@@ -485,6 +500,10 @@ def run_lodo(
             end_factor=1.0,
             total_iters=lr_warmup_steps,
         )
+
+    supcon_criterion = None
+    if supcon_weight > 0 and SupConLoss_cls is not None:
+        supcon_criterion = SupConLoss_cls(temperature=supcon_temp)
 
     best_auprc     = -1.0
     best_epoch     = 1
@@ -534,13 +553,22 @@ def run_lodo(
         start_epoch = epochs + 1
 
     for epoch in range(start_epoch, epochs + 1):
+        if hasattr(sampler, 'set_epoch'):
+            sampler.set_epoch(epoch)
         # ── train ────────────────────────────────────────────────────────────
         model.train()
         epoch_loss = 0.0
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
+            y_int = y.long()
             optimizer.zero_grad()
-            loss = criterion(model(x).squeeze(1), y)
+            if supcon_criterion is not None:
+                logits, z = model(x, return_embedding=True)
+                bce_loss = criterion(logits.squeeze(1), y)
+                sc_loss  = supcon_criterion(z, y_int)
+                loss = bce_loss + supcon_weight * sc_loss
+            else:
+                loss = criterion(model(x).squeeze(1), y)
             loss.backward()
             if grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)

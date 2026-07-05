@@ -79,7 +79,7 @@ import h5py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, Sampler, WeightedRandomSampler
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     precision_recall_curve, f1_score,
@@ -162,6 +162,72 @@ class FocalBCELoss(nn.Module):
         return (alpha_t * focal_w * bce_loss).mean()
 
 
+# ── supervised contrastive loss ──────────────────────────────────────────────
+
+class SupConLoss(nn.Module):
+    """
+    Supervised Contrastive Loss (Khosla et al. 2020, arXiv:2004.11362).
+
+    Pulls together L2-normalised embeddings that share the same binary label
+    (modified / unmodified) regardless of which H5 source file they came from,
+    and pushes apart embeddings with different labels.
+
+    This directly counteracts genomic-context leakage: to satisfy the loss the
+    encoder must find signal-level features shared between a modified UMCES site
+    and a modified ONT site (cross-dataset positive pairs) rather than
+    memorising dataset-specific context such as genomic region identity.
+
+    Parameters
+    ----------
+    temperature : τ — scales the cosine-similarity logits before softmax.
+                  Lower values create sharper distributions (harder negatives
+                  dominate). 0.07 is the value used in the SupCon paper.
+
+    Inputs
+    ------
+    features : (N, D) float32 tensor of L2-normalised embeddings
+               (output of ProjectionHead).
+    labels   : (N,)  int64 tensor, binary {0=unmod, 1=mod}.
+
+    Returns
+    -------
+    Scalar loss. Returns 0.0 (detached) when every sample in the batch shares
+    the same label (no valid positive pairs exist).
+    """
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        device = features.device
+        N = features.shape[0]
+
+        # Pairwise cosine similarity scaled by temperature: (N, N)
+        sim = torch.matmul(features, features.T) / self.temperature
+
+        # Positive mask: same label, excluding diagonal (self)
+        lbl = labels.view(-1, 1)
+        pos_mask = (lbl == lbl.T).float()
+        pos_mask.fill_diagonal_(0.0)
+
+        # Numerical stability: subtract per-row max before exp
+        sim = sim - sim.detach().max(dim=1, keepdim=True).values
+
+        self_mask = torch.eye(N, dtype=torch.bool, device=device)
+        exp_sim   = torch.exp(sim).masked_fill(self_mask, 0.0)
+        denom     = exp_sim.sum(dim=1, keepdim=True).clamp(min=1e-8)
+
+        log_prob  = sim - torch.log(denom)                      # (N, N)
+
+        n_pos = pos_mask.sum(dim=1)                             # (N,)
+        loss  = -(pos_mask * log_prob).sum(dim=1) / n_pos.clamp(min=1)
+
+        valid = n_pos > 0
+        if not valid.any():
+            return torch.tensor(0.0, device=device, requires_grad=True)
+        return loss[valid].mean()
+
+
 # ── HDF5 worker-safe file handle cache ───────────────────────────────────────
 #
 # h5py file objects are not safe to share across multiprocessing workers.
@@ -210,7 +276,8 @@ class PileupDataset(Dataset):
                  augment: bool = False, seed: int = 42,
                  rc_augment: bool = False,
                  signal_noise_std: float = 0.05,
-                 delta_channels: bool = True):
+                 delta_channels: bool = True,
+                 preload: bool = False):
         self.h5_paths   = h5_paths
         self.indices    = indices
         self.file_sizes = file_sizes
@@ -220,6 +287,8 @@ class PileupDataset(Dataset):
         self.delta_channels   = delta_channels
         self.rng        = np.random.default_rng(seed)
         self.offsets    = np.concatenate([[0], np.cumsum(file_sizes)])
+        self._mem       = None   # (N, C, H, W) float32 when preload=True
+        self._mem_y     = None   # (N,) float32 labels aligned to self.indices
 
         with h5py.File(h5_paths[0], 'r') as hf:
             self.n_channels       = int(hf.attrs.get('n_channels', 9))
@@ -228,6 +297,49 @@ class PileupDataset(Dataset):
             # center_idx: which window position is the candidate base (0-based)
             self.center_idx = int(hf.attrs.get(
                 'center_idx', self.window_positions // 2))
+
+        if preload:
+            self._preload_to_memory()
+
+    def _preload_to_memory(self) -> None:
+        """
+        Bulk-load every tensor for this split into one contiguous in-RAM array,
+        pre-transposed to (C, H, W).  Featurized HDF5 tensors are gzip-chunked
+        (64 imgs/chunk), so random per-item reads decompress a whole chunk per
+        image (~59 img/s).  Reading each file once sequentially (~3,400 img/s)
+        and serving __getitem__ from RAM removes that bottleneck entirely.
+
+        Memory: ~0.234 MB/image (9-channel; delta channels are added per-item
+        after augmentation, so they are NOT stored here).
+        """
+        # Group this split's global indices by source file, remembering the
+        # position of each within self.indices so _mem stays aligned to `item`.
+        n = len(self.indices)
+        H = W = C = None
+        mem = None
+        for file_idx, path in enumerate(self.h5_paths):
+            lo, hi = int(self.offsets[file_idx]), int(self.offsets[file_idx + 1])
+            sel = np.nonzero((self.indices >= lo) & (self.indices < hi))[0]
+            if len(sel) == 0:
+                continue
+            local = (self.indices[sel] - lo).astype(np.int64)
+            with h5py.File(path, 'r') as hf:
+                dset = hf['tensors']
+                if mem is None:
+                    H, W, C = dset.shape[1], dset.shape[2], dset.shape[3]
+                    mem = np.empty((n, C, H, W), dtype=np.float32)
+                    self._mem_y = np.empty((n,), dtype=np.float32)
+                labels = hf['labels']
+                # Bulk-read whole file once (fast sequential decompress), then
+                # gather the needed rows — far cheaper than random per-row reads.
+                order = np.argsort(local)
+                block = dset[:]                      # (n_file, H, W, C) one pass
+                lbl   = labels[:]
+                rows  = block[local[order]]          # (k, H, W, C)
+                mem[sel[order]] = np.transpose(rows, (0, 3, 1, 2))
+                self._mem_y[sel[order]] = lbl[local[order]].astype(np.float32)
+                del block, lbl, rows
+        self._mem = mem
 
     def _resolve(self, global_idx: int) -> tuple:
         file_idx  = int(np.searchsorted(self.offsets[1:], global_idx, side='right'))
@@ -238,15 +350,21 @@ class PileupDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, item):
-        global_idx          = int(self.indices[item])
-        file_idx, local_idx = self._resolve(global_idx)
+        if self._mem is not None:
+            # In-RAM path: already (C, H, W); copy so augmentation cannot
+            # corrupt the shared cache.
+            x = self._mem[item].copy()
+            y = float(self._mem_y[item])
+        else:
+            global_idx          = int(self.indices[item])
+            file_idx, local_idx = self._resolve(global_idx)
 
-        # Use per-process cached handle — safe for multiprocessing workers
-        hf = _get_h5(self.h5_paths[file_idx])
-        x  = hf['tensors'][local_idx].astype(np.float32)   # (H, W, C)
-        y  = float(hf['labels'][local_idx])
+            # Use per-process cached handle — safe for multiprocessing workers
+            hf = _get_h5(self.h5_paths[file_idx])
+            x  = hf['tensors'][local_idx].astype(np.float32)   # (H, W, C)
+            y  = float(hf['labels'][local_idx])
 
-        x = np.transpose(x, (2, 0, 1))   # → (C, H, W)
+            x = np.transpose(x, (2, 0, 1))   # → (C, H, W)
 
         if self.augment:
             H = x.shape[1]
@@ -494,7 +612,8 @@ class PileupInceptionV3(nn.Module):
     Output: (B, 1) logit
     """
     def __init__(self, in_channels: int = 9, dropout: float = 0.4,
-                 cross_read_attention: bool = False):
+                 cross_read_attention: bool = False,
+                 supcon_proj_dim: int = 0):
         super().__init__()
 
         self.stem = nn.Sequential(
@@ -531,6 +650,12 @@ class PileupInceptionV3(nn.Module):
             nn.Linear(512, 1),
         )
 
+        # Optional SupCon projection head — only active during training when
+        # return_embedding=True is passed to forward(). None disables the branch
+        # so inference is unchanged for all existing code.
+        self.proj_head = (ProjectionHead(512, 256, supcon_proj_dim)
+                          if supcon_proj_dim > 0 else None)
+
         self._init_weights()
 
     def _init_weights(self):
@@ -546,7 +671,7 @@ class PileupInceptionV3(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
+    def forward(self, x, return_embedding: bool = False):
         x = self.stem(x)
         x = self.inceptionA1(x)
         x = self.inceptionA2(x)
@@ -561,6 +686,15 @@ class PileupInceptionV3(nn.Module):
         x = self.inceptionD(x)
         x = self.inceptionE1(x)
         x = self.inceptionE2(x)
+
+        if return_embedding and self.proj_head is not None:
+            # Tap the 512-dim embedding after pool+flatten+dropout (head[0:3])
+            # then branch: logit via head[3], SupCon embedding via proj_head.
+            # head keys are unchanged so existing checkpoints load cleanly.
+            embed = self.head[2](self.head[1](self.head[0](x)))  # (B, 512)
+            logit = self.head[3](embed)                           # (B, 1)
+            return logit, self.proj_head(embed)                   # (B, 1), (B, proj_dim)
+
         return self.head(x)
 
 
@@ -592,6 +726,34 @@ class CrossReadAttention(nn.Module):
         return x + residual
 
 
+class ProjectionHead(nn.Module):
+    """
+    Two-layer MLP projection head for Supervised Contrastive Learning.
+
+    Maps the 512-dim backbone embedding to a lower-dimensional L2-normalised
+    sphere where SupConLoss is computed. The head is only used during training;
+    inference uses the backbone + classifier head unchanged.
+
+    Parameters
+    ----------
+    in_dim     : backbone embedding dimension (512 for PileupInceptionV3).
+    hidden_dim : intermediate width (default 256).
+    out_dim    : output embedding dimension written to the unit hypersphere
+                 via L2-normalisation (default 128).
+    """
+    def __init__(self, in_dim: int = 512, hidden_dim: int = 256,
+                 out_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.normalize(self.net(x), dim=1)
+
+
 PileupCNN = PileupInceptionV3   # alias for loo.py compatibility
 
 
@@ -619,6 +781,94 @@ def make_sampler(labels: np.ndarray,
         num_samples=int(num_samples),
         replacement=True,
     )
+
+
+class DatasetBalancedSampler(Sampler):
+    """
+    Epoch-level sampler that interleaves indices from all H5 source files so
+    that every training batch contains examples from multiple datasets.
+
+    Cross-dataset mixing is required for SupCon: if all samples in a batch
+    come from the same dataset, the contrastive loss only sees within-dataset
+    pairs and cannot enforce cross-dataset invariance.
+
+    Strategy
+    --------
+    Indices are grouped into (file_idx, label) buckets. At each epoch the
+    sampler cycles through files round-robin, drawing one unmod then one mod
+    index from each — producing an interleaved sequence that guarantees
+    cross-file pairs appear in every batch regardless of batch size.
+
+    Within-bucket ordering is reshuffled each epoch (seed + epoch number via
+    ``set_epoch``). Files that lack a class (e.g. all-unmod bc01-05) simply
+    skip the missing-label slot without error.
+
+    Parameters
+    ----------
+    global_indices : training indices into the concatenated label array.
+    file_sizes     : number of images per H5 file, in order.
+    labels         : full concatenated label array across all files.
+    num_samples    : epoch draw count (default: len(global_indices)).
+    seed           : base RNG seed, mixed with epoch via set_epoch.
+    """
+    def __init__(
+        self,
+        global_indices: np.ndarray,
+        file_sizes:     np.ndarray,
+        labels:         np.ndarray,
+        num_samples:    int | None = None,
+        seed:           int        = 42,
+    ):
+        offsets = np.concatenate([[0], np.cumsum(file_sizes)])
+
+        # Buckets store POSITIONAL indices into global_indices (i.e. values in
+        # [0, len(global_indices))), not the global H5 indices themselves.
+        # PyTorch samplers must yield values that the DataLoader passes as
+        # `item` to Dataset.__getitem__, which then does self.indices[item] —
+        # so item must index into the dataset's own indices array.
+        self.buckets: dict[tuple[int, int], list[int]] = {}
+        for pos, idx in enumerate(global_indices):
+            fi = int(np.searchsorted(offsets[1:], int(idx), side='right'))
+            lb = int(labels[int(idx)])
+            self.buckets.setdefault((fi, lb), []).append(pos)
+
+        self.n_files     = int(len(file_sizes))
+        self.num_samples = int(num_samples) if num_samples is not None else int(len(global_indices))
+        self.seed        = seed
+        self._epoch      = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self._epoch)
+
+        pools: dict[tuple[int, int], list[int]] = {}
+        for key, idxs in self.buckets.items():
+            arr = np.array(idxs, dtype=np.int64)
+            rng.shuffle(arr)
+            reps = (self.num_samples // max(len(arr), 1)) + 2
+            pools[key] = np.tile(arr, reps).tolist()
+
+        counters = {key: 0 for key in pools}
+        result: list[int] = []
+
+        while len(result) < self.num_samples:
+            for fi in range(self.n_files):
+                for lb in (0, 1):
+                    key = (fi, lb)
+                    if key in pools:
+                        result.append(pools[key][counters[key]])
+                        counters[key] += 1
+                    if len(result) >= self.num_samples:
+                        break
+                if len(result) >= self.num_samples:
+                    break
+
+        return iter(result[:self.num_samples])
 
 
 def make_loader_kwargs(batch_size: int,
@@ -1192,13 +1442,30 @@ def main():
                              'InceptionA3 and InceptionB (~26K extra params). '
                              'Lets reads attend to each other before the first '
                              'grid reduction.')
+    parser.add_argument('--supcon-weight', type=float, default=0.0,
+                        help='Weight λ for Supervised Contrastive loss added on '
+                             'top of BCE: total_loss = BCE + λ·SupCon. 0 disables '
+                             'SupCon (default). Recommended starting value: 0.1. '
+                             'Automatically enables DatasetBalancedSampler.')
+    parser.add_argument('--supcon-temp', type=float, default=0.07,
+                        help='Temperature τ for SupCon cosine-similarity scaling. '
+                             'Default 0.07 (SupCon paper / SimCLR value).')
+    parser.add_argument('--supcon-proj-dim', type=int, default=128,
+                        help='Output dimension of the SupCon projection head MLP '
+                             '(Linear(512,256)→ReLU→Linear(256,dim)→L2-norm). '
+                             'Only used when --supcon-weight > 0. Default 128.')
     args = parser.parse_args()
 
-    # Warn about bad combination
+    # Warn about bad combinations
     if args.focal and args.mixup_alpha > 0:
         print("WARNING: --focal + --mixup-alpha > 0 is not recommended. "
               "Soft mixup targets break focal loss p_t computation. "
               "Consider --mixup-alpha 0 when using --focal.", file=sys.stderr)
+    if args.supcon_weight > 0 and args.mixup_alpha > 0:
+        print("WARNING: --supcon-weight > 0 with --mixup-alpha > 0: SupCon "
+              "uses the original integer labels (pre-mixup) for pair mining, "
+              "but embeddings come from the mixed inputs. Consider "
+              "--mixup-alpha 0 when using SupCon.", file=sys.stderr)
 
     resume = not args.no_resume
 
@@ -1296,7 +1563,24 @@ def main():
               f"pin_memory={loader_kwargs['pin_memory']}",
               file=sys.stderr)
     sampler = None
-    if args.balanced_sampler:
+    if args.supcon_weight > 0:
+        if args.balanced_sampler:
+            print("NOTE: --balanced-sampler is superseded by DatasetBalancedSampler "
+                  "when --supcon-weight > 0.", file=sys.stderr)
+        epoch_samples = (args.epoch_samples
+                         if args.epoch_samples and args.epoch_samples > 0
+                         else len(train_labels))
+        sampler = DatasetBalancedSampler(
+            global_indices=train_idx,
+            file_sizes=file_sizes,
+            labels=labels,
+            num_samples=epoch_samples,
+            seed=args.seed,
+        )
+        print(f"Training sampler: DatasetBalancedSampler  "
+              f"{epoch_samples:,} examples/epoch across {len(h5_paths)} files "
+              f"(cross-file interleaving for SupCon)", file=sys.stderr)
+    elif args.balanced_sampler:
         epoch_samples = (args.epoch_samples
                          if args.epoch_samples and args.epoch_samples > 0
                          else len(train_labels))
@@ -1320,6 +1604,7 @@ def main():
         in_channels=in_ch,
         dropout=args.dropout,
         cross_read_attention=args.cross_read_attention,
+        supcon_proj_dim=args.supcon_proj_dim if args.supcon_weight > 0 else 0,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1420,6 +1705,13 @@ def main():
                   f"({args.lr_warmup_steps / max(len(train_loader), 1):.1f} epochs)",
                   file=sys.stderr)
 
+        supcon_criterion = None
+        if args.supcon_weight > 0:
+            supcon_criterion = SupConLoss(temperature=args.supcon_temp)
+            print(f"SupCon: weight={args.supcon_weight}  "
+                  f"temp={args.supcon_temp}  proj_dim={args.supcon_proj_dim}",
+                  file=sys.stderr)
+
         best_auprc     = -1.0
         best_epoch     = 1
         patience_count = 0
@@ -1475,19 +1767,29 @@ def main():
                   f"epochs; evaluating best checkpoint.", file=sys.stderr)
 
         for epoch in range(start_epoch, args.epochs + 1):
+            if isinstance(sampler, DatasetBalancedSampler):
+                sampler.set_epoch(epoch)
             model.train()
             epoch_loss = 0.0
             epoch_seen = 0
             n_train_batches = len(train_loader)
             for batch_idx, (x, y) in enumerate(train_loader, start=1):
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+                y_int = y.long()   # integer labels for SupCon (pre-mixup)
 
                 if args.mixup_alpha > 0 and not args.focal:
                     x, y = mixup_batch(x, y, alpha=args.mixup_alpha)
 
                 optimizer.zero_grad()
-                logits = model(x).squeeze(1)
-                loss   = criterion(logits, y)
+                if supcon_criterion is not None:
+                    logits, z = model(x, return_embedding=True)
+                    logits = logits.squeeze(1)
+                    bce_loss = criterion(logits, y)
+                    sc_loss  = supcon_criterion(z, y_int)
+                    loss = bce_loss + args.supcon_weight * sc_loss
+                else:
+                    logits = model(x).squeeze(1)
+                    loss   = criterion(logits, y)
                 loss.backward()
                 if args.grad_clip > 0:
                     nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
@@ -1544,6 +1846,7 @@ def main():
                     'args':                 vars(args),
                     'in_channels':          in_ch,
                     'cross_read_attention': args.cross_read_attention,
+                    'supcon_proj_dim':      args.supcon_proj_dim if args.supcon_weight > 0 else 0,
                 }, ckpt_path)
                 print(f"  ✓ New best  AUPRC={best_auprc:.4f}  checkpoint saved")
             else:
@@ -1802,6 +2105,9 @@ def main():
                 lr_warmup_steps=args.lr_warmup_steps,
                 cross_read_attention=args.cross_read_attention,
                 grad_clip=args.grad_clip,
+                supcon_weight=args.supcon_weight,
+                supcon_temp=args.supcon_temp,
+                supcon_proj_dim=args.supcon_proj_dim,
             )
             # Write the per-fold sentinel immediately so a crash after this
             # fold does not force it to rerun.

@@ -164,7 +164,7 @@ def rect(x, y, w, h, fill, stroke="none", stroke_width=0, extra="") -> str:
 def text(x, y, value, size=12, weight=400, fill="#111827", anchor="start", extra="") -> str:
     return (
         f'<text x="{x:.2f}" y="{y:.2f}" text-anchor="{anchor}" '
-        f'font-family="Inter, Arial, sans-serif" font-size="{size}" '
+        f'font-family="Tahoma, Arial, sans-serif" font-size="{size}" '
         f'font-weight="{weight}" fill="{fill}" {extra}>{esc(value)}</text>'
     )
 
@@ -244,6 +244,235 @@ def draw_reference_bases(
         out.append(rect(x, y0, w, height, fill, stroke="#ffffff", stroke_width=0.7))
         out.append(text(x + w / 2, y0 + height * 0.68, base, size=11, weight=750, fill=text_fill, anchor="middle"))
     return out
+
+
+def _draw_cartoon_traces(
+    raw: np.ndarray,
+    x0: float,
+    y0: float,
+    col_px: float,
+    row_px: float,
+    clip: float,
+) -> List[str]:
+    rows, cols = raw.shape
+    amp = row_px * 0.38
+    out: List[str] = []
+    for r in range(rows):
+        band_top = y0 + r * row_px
+        baseline = band_top + row_px * 0.52
+        if r == 0:
+            out.append(rect(x0, band_top + 1, cols * col_px, row_px - 2, "#f8fafc"))
+            stroke = "#111827"
+            width = 2.5
+            opacity = 1.0
+        else:
+            stroke = "#2563eb"
+            width = 1.4
+            opacity = 0.82
+        out.append(line(x0, baseline, x0 + cols * col_px, baseline,
+                        stroke="#e5e7eb", stroke_width=0.7))
+        points: List[Tuple[float, float]] = []
+        for c, value in enumerate(raw[r]):
+            if not np.isfinite(value):
+                continue
+            clipped = max(-clip, min(clip, float(value)))
+            x = x0 + (c + 0.5) * col_px
+            y = baseline - (clipped / clip) * amp
+            points.append((x, y))
+        if len(points) >= 2:
+            out.append(polyline(points, stroke=stroke, stroke_width=width, opacity=opacity))
+    return out
+
+
+def _draw_cartoon_bases(
+    base_channels: np.ndarray,
+    x0: float,
+    y0: float,
+    window_positions: int,
+    samples_per_base: int,
+    col_px: float,
+    height: float,
+) -> List[str]:
+    out: List[str] = []
+    for b in range(window_positions):
+        start = b * samples_per_base
+        end = start + samples_per_base
+        base = base_from_block(base_channels[0, start:end, :])
+        x = x0 + start * col_px
+        w = samples_per_base * col_px
+        fill = BASE_COLORS[base]
+        text_fill = "#ffffff" if base != "N" else "#6b7280"
+        out.append(rect(x, y0, w, height, fill, stroke="#ffffff", stroke_width=1.0))
+        out.append(text(x + w / 2, y0 + height * 0.68, base,
+                        size=18, weight=750, fill=text_fill, anchor="middle"))
+    return out
+
+
+def make_cartoon_figure(args: argparse.Namespace) -> Path:
+    """Poster-style figure: larger strokes, bigger fonts, 5mC badge, no sidebar."""
+    try:
+        import h5py
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "h5py is required to read DeepMod feature files. Activate the "
+            "DeepMod/rockfish environment or install h5py in this Python."
+        ) from exc
+
+    h5_path = args.h5
+    if args.output is None:
+        out_png = h5_path.with_name(h5_path.stem + "_cartoon.png")
+    else:
+        stem = args.output.with_suffix("")
+        out_png = stem.parent / (stem.name + "_cartoon.png")
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "r") as h5:
+        idx = choose_index(
+            h5,
+            index=args.index,
+            label=args.label,
+            ref_name=args.ref_name,
+            ref_pos=args.ref_pos,
+            image_idx=args.image_idx,
+        )
+        tensor = h5["tensors"][idx].astype(np.float32)
+        label_val = int(h5["labels"][idx]) if "labels" in h5 else -1
+        n_reads = int(h5["n_reads"][idx]) if "n_reads" in h5 else tensor.shape[0] - 1
+        attrs = dict(h5.attrs)
+
+    total_rows, total_cols, n_channels = tensor.shape
+    window_positions, samples_per_base = infer_w_l(attrs, total_cols)
+
+    max_reads = 20
+    display_rows = min(total_rows, max(1, min(n_reads, max_reads) + 1))
+    tensor = tensor[:display_rows]
+    raw = tensor[:, :, 0]
+    base_channels = (tensor[:, :, 2:6] if n_channels >= 6
+                     else np.zeros((*tensor.shape[:2], 4), dtype=np.float32))
+    clip = robust_signal_clip(raw)
+    label_text = "modified" if label_val == 1 else "unmodified" if label_val == 0 else "unknown"
+
+    col_px = 5.0
+    row_px = 22.0
+    trace_w = total_cols * col_px
+    trace_h = display_rows * row_px
+
+    left = 100.0
+    title_y = 42.0
+    subtitle_y = title_y + 26.0
+    base_label_y = subtitle_y + 36.0
+    base_track_y = base_label_y + 16.0
+    base_track_h = 44.0
+    badge_h = 26.0
+    badge_pad = 10.0
+    badge_y = base_track_y - badge_h - 7.0
+    trace_y = base_track_y + base_track_h + 16.0
+    axis_y = trace_y + trace_h + 10.0
+    tick_y = axis_y + 22.0
+    ref_label_y = tick_y + 20.0
+    legend_y = ref_label_y + 40.0
+    total_height = int(legend_y + 34.0)
+    total_width = int(left + trace_w + 60.0)
+
+    center_base = window_positions // 2
+    center_x = left + center_base * samples_per_base * col_px
+    center_w = samples_per_base * col_px
+    badge_x = center_x - badge_pad
+    badge_w = center_w + badge_pad * 2.0
+
+    svg: List[str] = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="{total_height}" '
+        f'viewBox="0 0 {total_width} {total_height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        text(total_width / 2, title_y, "Nanopore Signal Pileup at Candidate 5mC Site",
+             size=28, weight=750, anchor="middle"),
+        text(total_width / 2, subtitle_y,
+             f"label: {label_text}  |  {display_rows - 1} reads displayed",
+             size=14, fill="#6b7280", anchor="middle"),
+        text(left, base_label_y, "Reference bases", size=18, weight=700, fill="#374151"),
+    ]
+
+    # 5mC badge above candidate base with connector line
+    svg.append(rect(badge_x, badge_y, badge_w, badge_h, "#b45309", extra='rx="5"'))
+    svg.append(text(center_x + center_w / 2, badge_y + badge_h * 0.72,
+                    "5mC", size=14, weight=750, fill="#ffffff", anchor="middle"))
+    svg.append(line(center_x + center_w / 2, badge_y + badge_h,
+                    center_x + center_w / 2, base_track_y - 1,
+                    stroke="#b45309", stroke_width=1.5))
+
+    # Reference base tiles
+    svg.extend(_draw_cartoon_bases(base_channels, left, base_track_y, window_positions,
+                                   samples_per_base, col_px, base_track_h))
+    svg.append(rect(center_x, base_track_y - 1, center_w, base_track_h + 2,
+                    "none", stroke="#b45309", stroke_width=2.0))
+
+    # Pileup area with yellow candidate highlight
+    svg.append(rect(left, trace_y, trace_w, trace_h, "#ffffff", stroke="#111827", stroke_width=1.5))
+    svg.append(rect(center_x, trace_y, center_w, trace_h, "#fde68a",
+                    stroke="none", extra='opacity="0.6"'))
+    svg.extend(_draw_cartoon_traces(raw, left, trace_y, col_px, row_px, clip))
+    svg.append(rect(center_x, trace_y, center_w, trace_h, "none",
+                    stroke="#b45309", stroke_width=2.0))
+
+    # Row labels
+    svg.append(text(left - 12, trace_y + row_px * 0.70, "Reference",
+                    size=18, fill="#374151", anchor="end"))
+    svg.append(text(left - 12, trace_y + row_px * (display_rows + 1) / 2,
+                    "Reads", size=18, fill="#374151", anchor="end"))
+    svg.append(line(left - 6, trace_y + row_px * 1.1, left - 6,
+                    trace_y + trace_h - 2, stroke="#9ca3af", stroke_width=1.2))
+
+    # Column dividers
+    for b in range(window_positions + 1):
+        x = left + b * samples_per_base * col_px
+        is_center = b in (center_base, center_base + 1)
+        svg.append(line(x, base_track_y, x, base_track_y + base_track_h,
+                        stroke="#ffffff", stroke_width=1.0))
+        svg.append(line(x, trace_y, x, trace_y + trace_h,
+                        stroke="#64748b" if is_center else "#cbd5e1",
+                        stroke_width=1.2 if is_center else 0.8))
+
+    # X-axis and position labels
+    svg.append(line(left, axis_y, left + trace_w, axis_y, stroke="#374151", stroke_width=1.0))
+    for rel in [-10, -5, 0, 5, 10]:
+        b = center_base + rel
+        if 0 <= b < window_positions:
+            x = left + (b + 0.5) * samples_per_base * col_px
+            svg.append(line(x, axis_y, x, axis_y + 6, stroke="#374151", stroke_width=1.0))
+            lbl = "0" if rel == 0 else f"{rel:+d}"
+            svg.append(text(x, tick_y, lbl, size=13, fill="#4b5563", anchor="middle"))
+    svg.append(text(left + trace_w / 2, ref_label_y, "Reference window (bases)",
+                    size=20, fill="#4b5563", anchor="middle"))
+
+    # Horizontal legend
+    lx = left
+    svg.append(line(lx, legend_y - 6, lx + 40, legend_y - 6, stroke="#111827", stroke_width=2.5))
+    svg.append(text(lx + 50, legend_y, "Reference expected current", size=18, fill="#374151"))
+    lx2 = lx + 300
+    svg.append(line(lx2, legend_y - 6, lx2 + 40, legend_y - 6, stroke="#2563eb", stroke_width=1.4))
+    svg.append(text(lx2 + 50, legend_y, "Read resampled current", size=18, fill="#374151"))
+    lx3 = lx2 + 280
+    svg.append(rect(lx3, legend_y - 16, 40, 14, "#fde68a",
+                    stroke="#b45309", stroke_width=1.0, extra='opacity="0.7"'))
+    svg.append(text(lx3 + 50, legend_y, "5mC candidate window", size=18, fill="#374151"))
+
+    svg.append("</svg>")
+
+    converter = shutil.which("rsvg-convert")
+    if converter is None:
+        raise SystemExit(
+            "rsvg-convert is required to write PNG output, but it was not found on PATH."
+        )
+
+    with tempfile.NamedTemporaryFile("w", suffix=".svg", delete=False,
+                                     dir=str(out_png.parent)) as handle:
+        tmp_svg = Path(handle.name)
+        handle.write("\n".join(svg) + "\n")
+    try:
+        subprocess.run([converter, "-o", str(out_png), str(tmp_svg)], check=True)
+    finally:
+        tmp_svg.unlink(missing_ok=True)
+    return out_png
 
 
 def make_figure(args: argparse.Namespace) -> Path:
@@ -410,6 +639,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-padded", action="store_true", help="Show zero-padded read rows instead of omitting them.")
     parser.add_argument("--col-px", type=float, default=3.0, help="SVG pixels per signal sample.")
     parser.add_argument("--row-px", type=float, default=14.0, help="SVG pixels per signal/read trace row.")
+    parser.add_argument("--cartoon", action="store_true",
+                        help="Also generate a poster-style cartoon figure (_cartoon.png).")
     return parser.parse_args()
 
 
@@ -417,6 +648,9 @@ def main() -> None:
     args = parse_args()
     png_path = make_figure(args)
     print(f"Wrote PNG: {png_path}")
+    if args.cartoon:
+        cartoon_path = make_cartoon_figure(args)
+        print(f"Wrote cartoon PNG: {cartoon_path}")
 
 
 if __name__ == "__main__":
