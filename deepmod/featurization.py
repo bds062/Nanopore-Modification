@@ -708,6 +708,31 @@ def main():
         print(f"Ground truth: {len(gt_set):,} modified positions from {args.gt}",
               file=sys.stderr)
 
+    # Load (and, if huge, pre-sample) the candidate set BEFORE pass 1 so pass 1
+    # can skip storing read records for positions we'll never emit. Without
+    # this, pass 1 accumulates full per-read segment records for every
+    # target-base position genome-wide regardless of --candidate-bed, which
+    # does not scale past small bacterial genomes. Pre-sampling here is
+    # uniform-by-position (no base-identity weighting is possible yet, since
+    # ref base isn't known until a read covering that position is processed) —
+    # consistent with --uniform-sampling; if base-weighted sampling is
+    # requested instead, the final --sample-n-sites draw in pass 2 still
+    # applies on top of this coarser pre-filter.
+    candidate_set = None
+    if args.candidate_bed:
+        candidate_set = load_gt(args.candidate_bed)
+        print(f"Candidate sites: {len(candidate_set):,} from {args.candidate_bed}",
+              file=sys.stderr)
+        if args.sample_n_sites is not None:
+            presample_cap = args.sample_n_sites * 3  # margin for pass-2 coverage dropout
+            if len(candidate_set) > presample_cap:
+                candidate_list = sorted(candidate_set)
+                keep_idx = rng.choice(len(candidate_list), size=presample_cap,
+                                       replace=False)
+                candidate_set = {candidate_list[i] for i in keep_idx}
+                print(f"  Pre-sampled candidate set to {len(candidate_set):,} "
+                      f"positions (pass-1 memory guard, uniform)", file=sys.stderr)
+
     bam_fh = pysam.AlignmentFile(args.bam, 'rb', check_sq=False)
 
     # ── kmer level table (optional) ───────────────────────────────────────────
@@ -821,6 +846,8 @@ def main():
                     continue
 
                 key = (ref_name, rpos)
+                if candidate_set is not None and key not in candidate_set:
+                    continue
                 if key not in pos_refbase:
                     pos_refbase[key] = ref_base
 
@@ -878,17 +905,10 @@ def main():
         print("No eligible positions found — nothing to write.", file=sys.stderr)
         sys.exit(1)
 
-    # ── candidate-bed filter: restrict to known high-confidence sites ─────────
-    if args.candidate_bed:
-        candidate_set = load_gt(args.candidate_bed)
-        before = len(eligible)
-        eligible = {k: v for k, v in eligible.items() if k in candidate_set}
-        print(f"Candidate-bed filter: {before:,} → {len(eligible):,} positions "
-              f"({len(candidate_set):,} sites in BED)", file=sys.stderr)
-        if not eligible:
-            print("No positions remain after candidate-bed filter — nothing to write.",
-                  file=sys.stderr)
-            sys.exit(1)
+    # candidate-bed restriction already applied during pass 1 (candidate_set,
+    # possibly pre-sampled there for memory) — pos_reads/eligible only ever
+    # contained candidate positions to begin with, so no further filtering
+    # is needed here.
 
     # ── site sampling ─────────────────────────────────────────────────────────
     _BASE_WEIGHTS_BIASED   = {'A': 3.0, 'C': 3.0, 'G': 1.0, 'T': 1.0}

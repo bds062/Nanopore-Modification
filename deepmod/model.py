@@ -329,16 +329,34 @@ class PileupDataset(Dataset):
                     H, W, C = dset.shape[1], dset.shape[2], dset.shape[3]
                     mem = np.empty((n, C, H, W), dtype=np.float32)
                     self._mem_y = np.empty((n,), dtype=np.float32)
-                labels = hf['labels']
-                # Bulk-read whole file once (fast sequential decompress), then
-                # gather the needed rows — far cheaper than random per-row reads.
+                lbl = hf['labels'][:]
+                # Read the file in large SEQUENTIAL chunks and gather the needed
+                # rows from each, instead of materializing the whole file at once.
+                # Sequential chunk reads keep the fast-decompress advantage of a
+                # bulk read, but bound the transient copy to CHUNK images
+                # (~0.234 MB/image) rather than the entire file — critical for
+                # large pooled splits, where a whole-file read (up to ~117 GB for
+                # a 500k-image file) on top of the ~0.234 MB/image `mem` array
+                # would blow past node memory.
+                CHUNK = 50000
+                n_file = dset.shape[0]
                 order = np.argsort(local)
-                block = dset[:]                      # (n_file, H, W, C) one pass
-                lbl   = labels[:]
-                rows  = block[local[order]]          # (k, H, W, C)
-                mem[sel[order]] = np.transpose(rows, (0, 3, 1, 2))
-                self._mem_y[sel[order]] = lbl[local[order]].astype(np.float32)
-                del block, lbl, rows
+                local_sorted = local[order]
+                dest_sorted = sel[order]
+                self._mem_y[sel] = lbl[local].astype(np.float32)
+                j = 0
+                for c0 in range(0, n_file, CHUNK):
+                    c1 = min(c0 + CHUNK, n_file)
+                    j2 = j
+                    while j2 < len(local_sorted) and local_sorted[j2] < c1:
+                        j2 += 1
+                    if j2 > j:
+                        chunk = dset[c0:c1]                       # sequential read
+                        sub = chunk[local_sorted[j:j2] - c0]     # (m, H, W, C)
+                        mem[dest_sorted[j:j2]] = np.transpose(sub, (0, 3, 1, 2))
+                        del chunk, sub
+                    j = j2
+                del lbl
         self._mem = mem
 
     def _resolve(self, global_idx: int) -> tuple:
