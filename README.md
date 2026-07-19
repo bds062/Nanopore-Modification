@@ -134,21 +134,41 @@ python analysis/visualize_h5_pileup.py --h5 features.h5 --cartoon
 
 ## Known issues
 
-**Strand handling.** `get_ref_info_from_bam` (`deepmod/featurization.py:203-205`)
-reverse-complements the reference span for a reverse read and reverses its
-positions, but sites are keyed by `(contig, pos)` with **no strand**. Measured
-consequences on Ecoli_DM (6mA at palindromic GATC):
+**Strand handling.** Two separate things, often conflated. Measured on Ecoli_DM
+(6mA at palindromic GATC); see `analysis/make_reverse_complement_plots.py`.
 
-- Candidate images are **strand-pure** — each site is 100% forward or 100%
-  reverse reads, never mixed.
+*1. Candidate images are strand-pure — and this part is fine.*
+`get_ref_info_from_bam` (`deepmod/featurization.py:203-205`) reverse-complements
+the reference span for a reverse read, so at genomic position `P` a reverse read
+reports the **complement** of the forward base. `--target-bases AC` is then
+applied to *that* base (`featurization.py:845`), so:
+
+| true forward base | reads that survive the filter |
+|---|---|
+| A / C | forward reads only (reverse would report T / G) |
+| T / G | reverse reads only (their complement is A / C) |
+
+Mixed-strand sites are therefore **impossible by construction** — measured
+A → 1961 all-forward, T → 2039 all-reverse, 0 mixed. This is defensible: at a
+forward-T site the 6mA genuinely sits on the reverse strand's A, so keeping the
+reverse reads is the correct view. It is effectively per-strand calling.
+
+*2. The reference ROW can be in the opposite frame from its own reads — this is
+the real defect.* The reference row is built from `pos_ref_context`, which every
+read writes in its own orientation (last write wins). Consequences:
+
 - The reference row is **50% A / 50% T** at 6mA sites, though every 6mA is on an A.
 - Where the reference row reads T, **0% of reads match it** (`matches_ref = 0`)
   while every read still reads A.
 
-Downstream code must therefore not trust the reference row's base identity.
+So do not trust the reference row's base identity.
 `experiments/pipeline2/run_pipeline2.py` reads the reference base from the tensor
-one-hot at `half_window * L` (**not** `center_idx * L`, a different quantity) and
-types 6mA as `{A,T}` / 5mC as `{C,G}` to absorb the strand collapse.
+one-hot at `half_window * L` (**not** `center_idx * L` — that is the k-mer centre
+for the level-table lookup, a different quantity that also indexes columns and
+lands ~4 positions off-centre) and types 6mA as `{A,T}` / 5mC as `{C,G}` to
+absorb the ambiguity.
 
-Per-strand calling is not yet implemented; other callers (modkit, nanopolish)
-call per strand by default.
+Also note the reference row's channel 0 is the k-mer model's *expected* current
+while read rows are MAD-normalized *measured* current: `read - reference` carries
+a large constant baseline offset and is not a meaningful per-read deviation. Use
+each read minus its own flanking bases instead.

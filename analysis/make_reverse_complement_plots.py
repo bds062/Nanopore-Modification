@@ -118,16 +118,24 @@ def cartoon(h, cs, L, W, idx, out_png, title, half_win=5, max_reads=10):
     axL.set_title(title + f"\ncontig-pos {rp}  |  reference-row base at candidate = "
                   f"'{ref_bases[cand_local]}'  |  {nr} reads", fontsize=10, loc='left')
 
-    # right panel: Δcurrent at candidate per read, coloured by strand
-    ref_c = np.nanmean(raw[0, cand_local * L:(cand_local + 1) * L])
-    devs = np.array([np.nanmean(raw[1 + r, cand_local * L:(cand_local + 1) * L]) - ref_c
+    # Right panel: per-read dip AT the candidate relative to THAT READ'S OWN
+    # flanking bases. Deliberately NOT (read - reference row): the reference row
+    # is the k-mer model's *expected* current while read rows are MAD-normalized
+    # *measured* current, so their difference is dominated by a large constant
+    # baseline offset (~2 units here) that swamps the per-read variation. Each
+    # read minus its own flanks is baseline-free and is the quantity that
+    # actually reflects a modification at the candidate.
+    cand_sl = slice(cand_local * L, (cand_local + 1) * L)
+    flank_mask = np.ones(raw.shape[1], dtype=bool)
+    flank_mask[cand_sl] = False
+    devs = np.array([np.nanmean(raw[1 + r, cand_sl]) - np.nanmean(raw[1 + r, flank_mask])
                      for r in range(show)])
     ys = np.arange(show)[::-1]
     cols = [FWD if strand[r] > 0 else REV for r in range(show)]
     axR.barh(ys, devs, color=cols, height=0.6)
     axR.axvline(0, color='#374151', lw=1.2, ls='--')
     axR.set_ylim(-0.7, show + 0.8); axR.set_yticks([])
-    axR.set_xlabel('Δ current (read − ref)', fontsize=10)
+    axR.set_xlabel('Δ current at candidate\n(read − its own flanks)', fontsize=10)
     frac_match = float(np.mean(matches[:show]))
     nfwd = int(np.sum(strand[:show] > 0)); nrev = int(np.sum(strand[:show] < 0))
     axR.set_title(f'per-read deviation\n{nfwd} fwd / {nrev} rev shown · '
@@ -230,13 +238,15 @@ def metric_plots(h, cs, out, tag='Ecoli_DM (6mA, GATC)'):
     ax.set_ylim(-0.03, 1.03)
     fig.tight_layout(); fig.savefig(out / 'M3_flip_vs_reverse_fraction.png'); plt.close(fig)
 
-    # m4: strand composition histogram
+    # m4: strand composition histogram — perfectly bimodal (each image strand-PURE)
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     ax.hist(fr[np.isfinite(fr)], bins=25, color='#0ea5a4', edgecolor='white')
     ax.axvline(0.5, color=REFINK, ls='--', lw=1.2)
     ax.set_xlabel('fraction of reverse-strand reads per site')
     ax.set_ylabel('number of sites')
-    ax.set_title(f'M4  Both strands cover most sites — {tag}', fontsize=12, loc='left')
+    ax.set_title(f'M4  Every candidate image is strand-PURE — {tag}', fontsize=12, loc='left')
+    ax.text(0.30, 0.75, "no site is mixed:\n0% or 100% reverse, never between",
+            transform=ax.transAxes, fontsize=10, color=REFINK, ha='center')
     fig.tight_layout(); fig.savefig(out / 'M4_strand_composition_hist.png'); plt.close(fig)
 
     # m5: per-read base is always A; reference row is 50/50 (grouped)
@@ -264,6 +274,62 @@ def metric_plots(h, cs, out, tag='Ecoli_DM (6mA, GATC)'):
     return rec
 
 
+def m8_base_determines_strand(h, cs, ref_fasta, out, tag):
+    """The mechanism plot: the TRUE forward reference base fully determines which
+    strand's reads survive --target-bases AC, because the filter is applied to
+    each read's own strand-oriented (reverse-complemented) reference base."""
+    seq = []
+    for line in open(ref_fasta):
+        if not line.startswith('>'):
+            seq.append(line.strip())
+    seq = ''.join(seq).upper()
+    nr = h['n_reads'][:]; rp = h['ref_pos'][:]; lab = h['labels'][:]
+    idx = np.random.default_rng(0).choice(len(lab), min(4000, len(lab)), replace=False)
+    idx.sort()
+    blk = h['tensors'][idx.tolist()].astype(np.float32)
+    counts = {b: {'fwd': 0, 'rev': 0, 'mixed': 0} for b in 'ACGT'}
+    for i, ii in enumerate(idx):
+        k = int(nr[ii])
+        if k == 0:
+            continue
+        p = int(rp[ii])
+        if p >= len(seq):
+            continue
+        b = seq[p]
+        if b not in counts:
+            continue
+        fr = float(np.mean(blk[i, 1:1 + k, cs, 6] < 0))
+        counts[b]['fwd' if fr == 0 else 'rev' if fr == 1 else 'mixed'] += 1
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    x = np.arange(4); wdt = 0.26
+    fwd = [counts[b]['fwd'] for b in 'ACGT']
+    rev = [counts[b]['rev'] for b in 'ACGT']
+    mix = [counts[b]['mixed'] for b in 'ACGT']
+    ax.bar(x - wdt, fwd, wdt, label='all forward (+)', color=FWD)
+    ax.bar(x, rev, wdt, label='all reverse (−)', color=REV)
+    ax.bar(x + wdt, mix, wdt, label='mixed', color='#9ca3af')
+    for xi, v in zip(x - wdt, fwd):
+        if v: ax.text(xi, v, str(v), ha='center', va='bottom', fontsize=9, fontweight='bold')
+    for xi, v in zip(x, rev):
+        if v: ax.text(xi, v, str(v), ha='center', va='bottom', fontsize=9, fontweight='bold')
+    ax.set_xticks(x); ax.set_xticklabels(list('ACGT'))
+    ax.set_xlabel('TRUE forward reference base at the candidate')
+    ax.set_ylabel('number of sites')
+    ax.set_title(f'M8  The forward base decides the strand — {tag}', fontsize=12, loc='left')
+    ax.legend(frameon=False, fontsize=9)
+    ax.text(0.02, 0.72,
+            "--target-bases AC is applied to each read's OWN strand-oriented\n"
+            "reference base. A reverse read reports the COMPLEMENT, so:\n"
+            "   forward A/C  ->  only forward reads survive\n"
+            "   forward T/G  ->  only reverse reads survive (complement is A/C)\n"
+            "Mixed sites are therefore impossible by construction.",
+            transform=ax.transAxes, fontsize=9, va='top', color=REFINK)
+    fig.tight_layout(); fig.savefig(out / 'M8_forward_base_determines_strand.png')
+    plt.close(fig)
+    print("  wrote M8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out-dir', default='/fs/cbcb-scratch/bds062/results/reverse_complement')
@@ -277,30 +343,37 @@ def main():
     pos = np.nonzero(lab > 0)[0]
     blkc = h['tensors'][sorted(pos[:6000].tolist())].astype(np.float32)
     rowbase = BASES[np.argmax(blkc[:, 0, cs, 2:6], axis=1)]
-    # pick a clean (ref row = A) and a flipped (ref row = T) site, both mixed-strand, high coverage
-    def pick(want_base):
+    # Every candidate image is strand-PURE (the --target-bases AC filter is applied
+    # to each read's own strand-oriented reference base, so forward-A/C positions
+    # keep only forward reads and forward-T/G positions keep only reverse reads).
+    # So select by strand purity, NOT by a strand mix — a mixed site does not exist.
+    def pick_strand(want_rev, min_reads=15):
         for i, ii in enumerate(sorted(pos[:6000].tolist())):
-            if rowbase[i] != want_base:
-                continue
             k = int(nr[ii])
-            if k < 12:
+            if k < min_reads:
                 continue
             s = blkc[i, 1:1 + k, cs, 6]
-            if 0.25 < np.mean(s < 0) < 0.75:
-                return ii
-        return sorted(pos[:6000].tolist())[0]
-    idx_clean = pick('A'); idx_flip = pick('T')
+            frac_rev = float(np.mean(s < 0))
+            if (frac_rev == 1.0) == want_rev:
+                return ii, rowbase[i]
+        return sorted(pos[:6000].tolist())[0], '?'
 
-    cartoon(h, cs, L, W, idx_clean, out / 'C1_clean_site_refA.png',
-            "C1  Clean site: reference row = A, reads agree", max_reads=10)
-    cartoon(h, cs, L, W, idx_flip, out / 'C2_flipped_site_refT.png',
-            "C2  Strand-collapsed site: reference row flipped to T, every read still reads A", max_reads=10)
-    # C3: strand-coloured pileup on the flipped site with more reads
-    cartoon(h, cs, L, W, idx_flip, out / 'C3_strand_pileup.png',
-            "C3  Strand-coloured pileup (same site): forward vs reverse reads both map here",
+    idx_fwd, base_fwd = pick_strand(want_rev=False)
+    idx_rev, base_rev = pick_strand(want_rev=True)
+
+    cartoon(h, cs, L, W, idx_fwd, out / 'C1_strand_positive_site.png',
+            f"C1  STRAND-POSITIVE site — all reads are forward (+). Reference row = '{base_fwd}'",
+            max_reads=10)
+    cartoon(h, cs, L, W, idx_rev, out / 'C2_strand_negative_site.png',
+            f"C2  STRAND-NEGATIVE site — all reads are reverse (−). Reference row = '{base_rev}'",
+            max_reads=10)
+    cartoon(h, cs, L, W, idx_rev, out / 'C3_strand_negative_wide.png',
+            f"C3  Same strand-negative site, wider window — reverse reads carry the 6mA on their own strand",
             half_win=8, max_reads=14)
 
     metric_plots(h, cs, out, tag='Ecoli_DM (6mA, GATC)')
+    m8_base_determines_strand(h, cs, '/fs/cbcb-scratch/bds062/ref_prepped/ecoli.fa',
+                              out, tag='Ecoli_DM (6mA, GATC)')
     h.close()
 
     # second dataset: arabidopsis 5mC CpG (C/G palindrome) — same signature on C/G
