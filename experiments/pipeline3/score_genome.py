@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Score every site in a genome-wide features.h5 with a RawMod checkpoint, and emit a
+per-site score table for downstream de novo motif discovery / clustering.
+
+NON-CIRCULARITY (the point of this script):
+For a de novo claim the scoring model must never have seen the organism it is scoring.
+`--checkpoint` therefore defaults to the *leave-one-dataset-out* fold matching the
+dataset, not the mixed model. Mapping (see CHECKPOINT_FOR):
+    Ecoli_DM_5kHz        -> lodo_Ecoli_DM_5kHz
+    UMCES / SPO1         -> lodo_UMCES
+    HP26695_WT, HPJ99,
+    Anabaena, Tdenticola -> mixed        (test-only organisms: never in ANY training
+                                          pool, so the mixed model is already
+                                          non-circular for them)
+Note HP26695_WGA *is* in the training pool, so H. pylori 26695 WT is scored with the
+mixed model only because the WT sample itself is held out; the WGA control of the same
+organism was trained on. lodo_HP26695_WGA_5kHz is available via --checkpoint if the
+stricter reading is wanted, and `--both` scores with both for comparison.
+
+Outputs `<out>/<dataset>_scores.tsv.gz`:  contig, pos, score, label, n_reads
+"""
+import argparse
+import gzip
+import os
+import sys
+from pathlib import Path
+
+import h5py
+import numpy as np
+import torch
+
+# Resolve imports against THIS repo, not the scratch working copies. Only data and
+# trained checkpoints live on scratch; all code comes from the repo.
+REPO = Path(__file__).resolve().parents[2]          # .../Nanopore-Modification
+for _p in (REPO / 'experiments' / 'pipeline2',
+           REPO / 'experiments' / 'pipeline1',
+           REPO / 'deepmod'):
+    sys.path.insert(0, str(_p))
+
+# Trained weights (data artefact, not code) — overridable for portability.
+MODELS = Path(os.environ.get(
+    'RAWMOD_MODELS',
+    '/fs/cbcb-scratch/bds062/results/deepmod_full_pipeline2/results2/models'))
+
+CHECKPOINT_FOR = {
+    'Ecoli_DM_5kHz':        MODELS / 'lodo_Ecoli_DM_5kHz/lodo/best_model.pt',
+    'Ecoli_DM_MSssI_5kHz':  MODELS / 'lodo_Ecoli_DM_MSssI_5kHz/lodo/best_model.pt',
+    'Ecoli_WT_5kHz':        MODELS / 'lodo_Ecoli_WT_5kHz/lodo/best_model.pt',
+    'arabidopsis':          MODELS / 'lodo_arabidopsis/lodo/best_model.pt',
+    'UMCES':                MODELS / 'lodo_UMCES/lodo/best_model.pt',
+    'ONT':                  MODELS / 'lodo_ONT/lodo/best_model.pt',
+    'HP26695_WGA_5kHz':     MODELS / 'lodo_HP26695_WGA_5kHz/lodo/best_model.pt',
+    # test-only organisms — never in any training pool
+    'HP26695_WT_5kHz':      MODELS / 'mixed/base/best_model.pt',
+    'HPJ99_WT_5kHz':        MODELS / 'mixed/base/best_model.pt',
+    'Anabaena_WT_5kHz':     MODELS / 'mixed/base/best_model.pt',
+    'Tdenticola_WT_5kHz':   MODELS / 'mixed/base/best_model.pt',
+}
+
+
+def load_model(ckpt, device):
+    """Reuse the repo's canonical loader (experiments/pipeline1/test_model.py).
+
+    Checkpoints are written by run_pipeline.py as
+        {'model_state': ..., 'in_channels': 11, 'val_auprc': ..., 'epoch': ..., 'tag': ...}
+    and test_model.load_model already handles that plus architecture auto-detection,
+    so do not reimplement it here.
+    """
+    from test_model import load_model as _load
+    model, meta = _load(str(ckpt), device, arch='auto')
+    print(f"  checkpoint: tag={meta.get('tag')} epoch={meta.get('epoch')} "
+          f"val_auprc={meta.get('val_auprc')}", flush=True)
+    model.eval()
+    return model
+
+
+def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False):
+    """Stream the whole file through the model. Returns (scores, embeds|None)."""
+    from model import PileupDataset
+    with h5py.File(h5_path, 'r') as h:
+        n = h['tensors'].shape[0]
+    ds = PileupDataset([str(h5_path)], np.arange(n, dtype=np.int64), [n],
+                       augment=False, seed=0, signal_noise_std=0.0,
+                       delta_channels=True, preload=False)
+    from torch.utils.data import DataLoader
+    from model import make_loader_kwargs, _worker_init_fn
+    try:
+        lk = make_loader_kwargs(batch, workers, device, _worker_init_fn)
+        loader = DataLoader(ds, shuffle=False, **lk)
+    except Exception:
+        loader = DataLoader(ds, batch_size=batch, shuffle=False, num_workers=workers)
+
+    model = load_model(ckpt, device)
+
+    # ConvFormerV2 has no forward_features; its penultimate representation is
+    # self.norm(pooled), which is exactly the INPUT to self.head. Capture it with a
+    # forward hook rather than reimplementing forward() (which would drift).
+    cap = {}
+    hook = None
+    if want_embed:
+        def _grab(_mod, inp, _out):
+            cap['e'] = inp[0].detach()
+        hook = model.head.register_forward_hook(_grab)
+
+    out = np.empty(n, dtype=np.float32)
+    embeds = [] if want_embed else None
+    i = 0
+    with torch.no_grad():
+        for xb, _ in loader:
+            xb = xb.to(device, non_blocking=True)
+            logit = model(xb)
+            if want_embed:
+                embeds.append(cap['e'].float().cpu().numpy())
+            p = torch.sigmoid(logit.squeeze(-1)).float().cpu().numpy()
+            out[i:i + len(p)] = p
+            i += len(p)
+    if hook is not None:
+        hook.remove()
+    if want_embed and embeds:
+        embeds = np.concatenate(embeds, 0)
+    return out, embeds
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--h5', required=True)
+    ap.add_argument('--dataset', required=True)
+    ap.add_argument('--out-dir', required=True)
+    ap.add_argument('--checkpoint', default=None,
+                    help='override; default is the non-circular fold for --dataset')
+    ap.add_argument('--tag', default=None, help='suffix for the output file')
+    ap.add_argument('--batch', type=int, default=512)
+    ap.add_argument('--workers', type=int, default=8)
+    ap.add_argument('--save-embeddings', action='store_true')
+    a = ap.parse_args()
+
+    ckpt = Path(a.checkpoint) if a.checkpoint else CHECKPOINT_FOR.get(a.dataset)
+    if ckpt is None or not Path(ckpt).exists():
+        raise SystemExit(f"no checkpoint for {a.dataset!r} (looked at {ckpt})")
+    out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"scoring {a.dataset}\n  h5   = {a.h5}\n  ckpt = {ckpt}\n  dev  = {device}",
+          flush=True)
+
+    s, emb = score(a.h5, ckpt, device, a.batch, a.workers, a.save_embeddings)
+
+    with h5py.File(a.h5, 'r') as h:
+        contigs = [x.decode() if isinstance(x, bytes) else str(x)
+                   for x in h['ref_names'][:]]
+        pos = h['ref_pos'][:]
+        lab = h['labels'][:]
+        nrd = h['n_reads'][:] if 'n_reads' in h else np.zeros(len(pos), dtype=int)
+
+    tag = f"_{a.tag}" if a.tag else ""
+    fout = out / f"{a.dataset}{tag}_scores.tsv.gz"
+    with gzip.open(fout, 'wt') as fh:
+        fh.write("contig\tpos\tscore\tlabel\tn_reads\n")
+        for c, p, sc, l, nr in zip(contigs, pos, s, lab, nrd):
+            fh.write(f"{c}\t{int(p)}\t{sc:.6f}\t{int(l)}\t{int(nr)}\n")
+    print(f"wrote {fout}  ({len(s):,} sites)  mean_score={s.mean():.4f}", flush=True)
+
+    if emb is not None:
+        np.save(out / f"{a.dataset}{tag}_embed.npy", emb.astype(np.float16))
+        print(f"wrote embeddings {emb.shape}", flush=True)
+
+
+if __name__ == '__main__':
+    main()
