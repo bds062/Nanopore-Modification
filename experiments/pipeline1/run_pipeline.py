@@ -210,10 +210,16 @@ def make_ds(group, idx, augment, hp):
     # instead (mem ~a few GB -> qos=high); only fast once the tensors are
     # re-chunked to few-images/chunk (see scripts/rechunk_features.py).
     preload = os.environ.get('PILEUP_PRELOAD', '1') != '0'
+    # PILEUP_MASK_FLANK=1 blanks base identity (ch 2-5) everywhere except the
+    # candidate position, so a recognition motif such as GATC cannot be read off
+    # the tensor. The candidate base itself is kept: it is legitimate evidence
+    # (6mA only occurs at A, 5mC only at C).
+    mask_flank = os.environ.get('PILEUP_MASK_FLANK', '0') == '1'
     return PileupDataset(group.paths, idx, group.file_sizes,
                          augment=augment, seed=hp.seed,
                          signal_noise_std=hp.signal_noise,
-                         delta_channels=True, preload=preload)
+                         delta_channels=True, preload=preload,
+                         mask_flank_bases=mask_flank)
 
 
 def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=None):

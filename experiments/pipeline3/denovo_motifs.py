@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import combine_pvalues, rankdata
+from scipy.stats import chi2, rankdata
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'pipeline'))
@@ -96,21 +96,31 @@ def scores_to_pvalues(score):
 
 def fisher_smooth(contig, pos, pval, window=5):
     """nanodisco step 2: combine consecutive p-values with Fisher's method in a
-    `window`-bp sliding window, per contig, respecting genomic coordinates."""
+    `window`-bp sliding window, per contig, respecting genomic coordinates.
+
+    Vectorised. Fisher's method is X = -2 * sum(ln p_i) with df = 2k, so the whole
+    window can be accumulated with searchsorted lookups per offset instead of a
+    per-site scipy call (which is ~100x slower over 500k sites).
+    """
     out = np.full(len(pval), 1.0)
     half = window // 2
-    order = np.lexsort((pos, contig))
+    logp = np.log(np.clip(pval, 1e-300, 1.0))
     for c in np.unique(contig):
-        idx = order[contig[order] == c]
-        p = pos[idx]; v = pval[idx]
-        # map position -> index for neighbour lookup
-        pos_to_i = {int(pp): k for k, pp in enumerate(p)}
-        comb = np.empty(len(idx))
-        for k, pp in enumerate(p):
-            neigh = [v[pos_to_i[q]] for q in range(int(pp) - half, int(pp) + half + 1)
-                     if q in pos_to_i]
-            comb[k] = combine_pvalues(neigh, method='fisher')[1] if len(neigh) > 1 else v[k]
-        out[idx] = comb
+        m = np.nonzero(contig == c)[0]
+        order = m[np.argsort(pos[m])]
+        p = pos[order].astype(np.int64)
+        lv = logp[order]
+        acc = np.zeros(len(p)); cnt = np.zeros(len(p), dtype=np.int64)
+        for d in range(-half, half + 1):
+            tgt = p + d
+            j = np.searchsorted(p, tgt)
+            ok = (j < len(p))
+            j_ok = np.clip(j, 0, len(p) - 1)
+            hit = ok & (p[j_ok] == tgt)          # that genomic position was scored
+            acc[hit] += lv[j_ok][hit]
+            cnt[hit] += 1
+        X = -2.0 * acc
+        out[order] = chi2.sf(X, 2 * np.maximum(cnt, 1))
     return out
 
 

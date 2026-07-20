@@ -277,7 +277,8 @@ class PileupDataset(Dataset):
                  rc_augment: bool = False,
                  signal_noise_std: float = 0.05,
                  delta_channels: bool = True,
-                 preload: bool = False):
+                 preload: bool = False,
+                 mask_flank_bases: bool = False):
         self.h5_paths   = h5_paths
         self.indices    = indices
         self.file_sizes = file_sizes
@@ -294,9 +295,24 @@ class PileupDataset(Dataset):
             self.n_channels       = int(hf.attrs.get('n_channels', 9))
             self.window_positions = int(hf.attrs.get('W', 0))
             self.samples_per_base = int(hf.attrs.get('L', 0))
-            # center_idx: which window position is the candidate base (0-based)
+            # Which window position is the candidate base (0-based).
+            #
+            # Do NOT read attrs['center_idx'] here. That attribute is the K-MER
+            # centre used for the level-table lookup (6 for a 9-mer), which is a
+            # different quantity that merely also indexes window positions. The
+            # candidate base sits at the WINDOW centre = half_window (10 for
+            # W=21). Reading center_idx placed the ch9 delta 4 positions
+            # off-centre, onto a background base: measured on Ecoli_DM, column
+            # center_idx*L shows A/C/G/T ~= 23/27/30/20% (background) while the
+            # true centre shows 50% A / 50% T (the GATC 6mA sites).
             self.center_idx = int(hf.attrs.get(
-                'center_idx', self.window_positions // 2))
+                'half_window', self.window_positions // 2))
+            # Optionally blank the base one-hots (ch 2-5) everywhere EXCEPT the
+            # candidate position. The centre base is legitimate information
+            # (6mA only occurs at A, 5mC only at C); the FLANKING bases are what
+            # let a model memorise a recognition motif such as GATC and fire on
+            # it regardless of the signal. See experiments/pipeline3.
+            self.mask_flank_bases = mask_flank_bases
 
         if preload:
             self._preload_to_memory()
@@ -383,6 +399,17 @@ class PileupDataset(Dataset):
             y  = float(hf['labels'][local_idx])
 
             x = np.transpose(x, (2, 0, 1))   # → (C, H, W)
+
+        # Blank flanking base identity so a recognition motif (e.g. GATC) cannot
+        # be read off the tensor, while keeping the candidate base itself.
+        # Applied before augmentation/deltas so everything downstream is
+        # consistent with what the model will actually see.
+        if self.mask_flank_bases and self.samples_per_base > 0:
+            L = self.samples_per_base
+            cs, ce = self.center_idx * L, self.center_idx * L + L
+            keep = x[2:6, :, cs:ce].copy()
+            x[2:6, :, :] = 0.0
+            x[2:6, :, cs:ce] = keep
 
         if self.augment:
             H = x.shape[1]
