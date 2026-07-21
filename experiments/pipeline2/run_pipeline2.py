@@ -70,8 +70,13 @@ import h5py
 import numpy as np
 import torch
 
-PIPE1 = Path('/fs/cbcb-scratch/bds062/results/deepmod_full_pipeline1')
-DEEPMOD = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod')
+# Resolve imports against THIS repo, never the scratch working copies. Pointing at
+# scratch silently loads a stale run_pipeline/ConvFormerV2 (this cost a full sweep:
+# the scratch ConvFormerV2 had no dann_lambda, so every job died at model
+# construction). Only data and trained checkpoints live on scratch.
+REPO = Path(__file__).resolve().parents[2]          # .../Nanopore-Modification
+PIPE1 = REPO / 'experiments' / 'pipeline1'
+DEEPMOD = REPO / 'deepmod'
 sys.path.insert(0, str(PIPE1))
 sys.path.insert(0, str(DEEPMOD))
 
