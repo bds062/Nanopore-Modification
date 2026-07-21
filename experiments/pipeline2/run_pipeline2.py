@@ -359,7 +359,12 @@ def main():
         }, open(out / 'config.json', 'w'), indent=2)
         print(f"Wrote {out / 'config.json'}", flush=True)
 
-    model_factory = lambda: ConvFormerV2(dropout=hp.dropout)
+    # Sequence-context adversary (gradient reversal on the flanking reference
+    # bases) to suppress motif memorisation. Off unless DANN_LAMBDA is set.
+    dann_lambda = float(os.environ.get('DANN_LAMBDA', '0'))
+    if dann_lambda > 0:
+        print(f"  [DANN] sequence-context adversary, lambda={dann_lambda}", flush=True)
+    model_factory = lambda: ConvFormerV2(dropout=hp.dropout, dann_lambda=dann_lambda)
     rows = []
 
     def eval_and_record(model, run, test_name, g, idx, held_out=''):

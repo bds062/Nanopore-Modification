@@ -47,6 +47,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import run_pipeline as R
 
@@ -112,9 +113,37 @@ class ReadConvEncoderV2(nn.Module):
         return self.pool(x).squeeze(-1)           # (B*H, d_model)
 
 
+class _GradReverse(torch.autograd.Function):
+    """Identity forward; gradient multiplied by -lambda on the backward pass."""
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad.neg() * ctx.lambd, None
+
+
+def grad_reverse(x, lambd):
+    return _GradReverse.apply(x, lambd)
+
+
 class ConvFormerV2(nn.Module):
+    """
+    With dann_lambda > 0, a sequence-context adversary is attached to the pooled
+    representation via a gradient-reversal layer. It predicts the FLANKING
+    reference bases (offsets ±1..±flank from the candidate; the candidate base
+    itself is NOT predicted, since 6mA=A / 5mC=C is legitimate signal). Gradient
+    reversal drives the shared representation to be UNINFORMATIVE about the motif
+    context, so the model cannot fire on a recognition motif (e.g. GATC) from
+    sequence alone and must rely on the modification signal. The adversary reads
+    the flanking-base targets straight from the input tensor's reference row, so
+    no extra labels are needed; forward() returns (logit, adv_loss) when active.
+    """
     def __init__(self, in_ch=IN_CH, h=H, w=W, d_model=D_MODEL, nhead=4,
-                 layers=2, dim_ff=192, dropout=0.4):
+                 layers=2, dim_ff=192, dropout=0.4,
+                 dann_lambda=0.0, dann_flank=4, window_positions=21):
         super().__init__()
         self.read_encoder = ReadConvEncoderV2(in_ch, d_model)
         self.pos = nn.Parameter(torch.zeros(1, h, d_model))
@@ -125,6 +154,30 @@ class ConvFormerV2(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(d_model, 1))
         nn.init.trunc_normal_(self.pos, std=0.02)
+
+        # --- sequence-context adversary ---
+        self.dann_lambda = float(dann_lambda)
+        self.dann_flank = int(dann_flank)
+        self.Wp = int(window_positions)
+        # candidate at window centre; flanking offsets exclude 0
+        c = self.Wp // 2
+        self.flank_cols = [c + d for d in range(-self.dann_flank, self.dann_flank + 1)
+                           if d != 0 and 0 <= c + d < self.Wp]
+        if self.dann_lambda > 0:
+            self.adv = nn.Sequential(
+                nn.Linear(d_model, 128), nn.GELU(), nn.Dropout(dropout),
+                nn.Linear(128, len(self.flank_cols) * 4))
+
+    def _flank_targets(self, x):
+        """Per-flank-position reference base index (0-3) + validity, from row 0."""
+        B = x.shape[0]
+        L = x.shape[3] // self.Wp
+        ref = x[:, 2:6, 0, :].view(B, 4, self.Wp, L).mean(dim=3)  # (B,4,Wp)
+        cols = torch.tensor(self.flank_cols, device=x.device)
+        oh = ref[:, :, cols]                        # (B,4,F)
+        valid = oh.sum(dim=1) > 0.05                # (B,F) — position has a base
+        tgt = oh.argmax(dim=1)                      # (B,F)
+        return tgt, valid
 
     def forward(self, x):                        # (B, C, H, W)
         B, C, Hh, Ww = x.shape
@@ -137,7 +190,18 @@ class ConvFormerV2(nn.Module):
         enc = self.encoder(emb, src_key_padding_mask=pad)
         keep = (~pad).unsqueeze(-1).float()
         pooled = (enc * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1.0)
-        return self.head(self.norm(pooled))
+        rep = self.norm(pooled)
+        logit = self.head(rep)
+
+        if self.dann_lambda > 0 and self.training:
+            tgt, valid = self._flank_targets(x)                  # (B,F)
+            adv_logits = self.adv(grad_reverse(rep, self.dann_lambda))
+            adv_logits = adv_logits.view(B, len(self.flank_cols), 4)
+            ce = F.cross_entropy(adv_logits.reshape(-1, 4), tgt.reshape(-1),
+                                 reduction='none').view(B, -1)
+            adv_loss = (ce * valid.float()).sum() / valid.float().sum().clamp(min=1.0)
+            return logit, adv_loss
+        return logit
 
 
 def main():

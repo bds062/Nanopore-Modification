@@ -255,11 +255,20 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for ep in range(1, hp.epochs + 1):
-        model.train(); t0 = time.time(); eloss = eseen = 0
+        model.train(); t0 = time.time(); eloss = eseen = eadv = 0
         for x, y in train_loader:
             x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
             opt.zero_grad()
-            loss = crit(model(x).squeeze(1), y)
+            out = model(x)
+            # A DANN-enabled model returns (logit, adversary_loss) in train mode.
+            # The gradient-reversal layer already carries the sign, so the two
+            # losses are simply summed; the adversary CE is logged separately.
+            if isinstance(out, tuple):
+                logit, adv_loss = out
+                loss = crit(logit.squeeze(1), y) + adv_loss
+                eadv += float(adv_loss) * len(y)
+            else:
+                loss = crit(out.squeeze(1), y)
             loss.backward()
             if hp.grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), hp.grad_clip)
@@ -277,7 +286,8 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
             sched.step(vauprc)
         tr_hist.append(tr_loss); ap_hist.append(vauprc)
         va_hist.append(vauprc)
-        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  "
+        adv_str = f"adv_ce={eadv/max(eseen,1):.4f}  " if eadv else ""
+        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  {adv_str}"
               f"val_AUPRC={vauprc:.4f}  lr={opt.param_groups[0]['lr']:.2e}  "
               f"{time.time()-t0:.1f}s", flush=True)
         _wandb_log({f'{tag}/train_loss': tr_loss, f'{tag}/val_auprc': vauprc,
