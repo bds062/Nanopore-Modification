@@ -278,7 +278,8 @@ class PileupDataset(Dataset):
                  signal_noise_std: float = 0.05,
                  delta_channels: bool = True,
                  preload: bool = False,
-                 mask_flank_bases: bool = False):
+                 mask_flank_bases: bool = False,
+                 legacy_ch9_center: bool = False):
         self.h5_paths   = h5_paths
         self.indices    = indices
         self.file_sizes = file_sizes
@@ -307,6 +308,13 @@ class PileupDataset(Dataset):
             # true centre shows 50% A / 50% T (the GATC 6mA sites).
             self.center_idx = int(hf.attrs.get(
                 'half_window', self.window_positions // 2))
+            # legacy_ch9_center: models trained BEFORE the ch9 fix learned ch9 at
+            # the k-mer centre (attrs['center_idx']). To score such a model on
+            # matched inputs, compute ch9 at that same (wrong) column so training
+            # and inference agree. New models leave this False.
+            self._kmer_center = int(hf.attrs.get('center_idx',
+                                                 self.window_positions // 2))
+            self.legacy_ch9_center = legacy_ch9_center
             # Optionally blank the base one-hots (ch 2-5) everywhere EXCEPT the
             # candidate position. The centre base is legitimate information
             # (6mA only occurs at A, 5mC only at C); the FLANKING bases are what
@@ -431,7 +439,7 @@ class PileupDataset(Dataset):
         # the (potentially noised) raw signal channel the model sees.
         if self.delta_channels and self.samples_per_base > 0:
             L  = self.samples_per_base
-            ci = self.center_idx
+            ci = self._kmer_center if self.legacy_ch9_center else self.center_idx
             cs, ce = ci * L, ci * L + L          # center base column slice
 
             # Ch 9: per-read center-position delta broadcast across the full

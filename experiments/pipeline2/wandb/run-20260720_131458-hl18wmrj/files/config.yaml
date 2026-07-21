@@ -1,0 +1,144 @@
+_wandb:
+    value:
+        cli_version: 0.28.0
+        e:
+            oa36qebq1fry4il4dlrv3bjsri2cqbb3:
+                args:
+                    - --fold
+                    - mixed
+                    - --out-dir
+                    - /fs/cbcb-scratch/bds062/results/rawmod_full_pipeline3/train_ablation/A_ch9fix
+                cpu_count: 128
+                cpu_count_logical: 128
+                cudaVersion: "13.2"
+                disk:
+                    /:
+                        total: "41875931136"
+                        used: "18246627328"
+                email: bds062@terpmail.umd.edu
+                executable: /fs/nexus-scratch/bds062/envs/mod/bin/python
+                git:
+                    commit: a6403efcc3598fe2f60a729c9a11bb2ef0f70d14
+                    remote: git@github.com:bds062/Nanopore-Modification.git
+                gpu: NVIDIA RTX A5000
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 8192
+                      memoryTotal: "25757220864"
+                      name: NVIDIA RTX A5000
+                      uuid: GPU-64459e7b-ff3b-aaad-2da9-fd1f91e90b38
+                host: cbcb26.umiacs.umd.edu
+                memory:
+                    total: "540298321920"
+                os: Linux-5.14.0-687.20.1.el9_8.x86_64-x86_64-with-glibc2.34
+                program: /fs/nexus-scratch/bds062/Nanopore-Modification/experiments/pipeline2/run_pipeline2.py
+                python: CPython 3.11.13
+                root: /fs/nexus-scratch/bds062/Nanopore-Modification/experiments/pipeline2
+                slurm:
+                    cluster_name: nexus
+                    conf: /etc/slurm/slurm.conf
+                    cpus_on_node: "10"
+                    cpus_per_task: "10"
+                    gpus_on_node: "1"
+                    gtids: "0"
+                    job_account: cbcb
+                    job_cpus_per_node: "10"
+                    job_end_time: "1784654087"
+                    job_gid: "17735"
+                    job_gpus: "0"
+                    job_id: "7113798"
+                    job_name: fp3_A_ch9fix
+                    job_nodelist: cbcb26
+                    job_num_nodes: "1"
+                    job_partition: cbcb
+                    job_qos: high
+                    job_start_time: "1784567687"
+                    job_uid: "17735"
+                    job_user: bds062
+                    jobid: "7113798"
+                    localid: "0"
+                    mem_per_node: "49152"
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: cbcb26
+                    nprocs: "1"
+                    ntasks: "1"
+                    oom_kill_step: "1"
+                    prio_process: "0"
+                    procid: "0"
+                    submit_dir: /fs/cbcb-scratch/bds062
+                    submit_host: cbcb24.umiacs.umd.edu
+                    task_pid: "3288229"
+                    tasks_per_node: "1"
+                    topology_addr: cbcb26
+                    topology_addr_pattern: node
+                    tres_per_task: cpu=10
+                startedAt: "2026-07-20T17:14:58.210402Z"
+                writerId: oa36qebq1fry4il4dlrv3bjsri2cqbb3
+        m: []
+        python_version: 3.11.13
+        t:
+            "1":
+                - 1
+                - 5
+                - 53
+            "2":
+                - 1
+                - 5
+                - 53
+            "3":
+                - 2
+                - 3
+                - 13
+                - 16
+                - 62
+            "4": 3.11.13
+            "5": 0.28.0
+            "12": 0.28.0
+            "13": linux-x86_64
+architecture:
+    value: ConvFormerV2
+batch:
+    value: 512
+dropout:
+    value: 0.4
+epochs:
+    value: 50
+external_test_datasets:
+    value:
+        - Anabaena_WT_5kHz
+        - HP26695_WT_5kHz
+        - HPJ99_WT_5kHz
+        - Tdenticola_WT_5kHz
+fold:
+    value: mixed
+grad_clip:
+    value: 1
+lr:
+    value: 0.0012
+num_workers:
+    value: 8
+patience:
+    value: 15
+run_id:
+    value: "43183581"
+seed:
+    value: 42
+signal_noise:
+    value: 0.05
+train_datasets:
+    value:
+        - Ecoli_DM_5kHz
+        - Ecoli_DM_MSssI_5kHz
+        - Ecoli_WT_5kHz
+        - HP26695_WGA_5kHz
+        - arabidopsis
+        - UMCES
+        - ONT
+val_frac:
+    value: 0.15
+warmup_steps:
+    value: 500
+weight_decay:
+    value: 0.001

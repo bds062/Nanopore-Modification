@@ -75,14 +75,22 @@ def load_model(ckpt, device):
     return model
 
 
-def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False):
-    """Stream the whole file through the model. Returns (scores, embeds|None)."""
+def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False,
+          legacy_ch9=False):
+    """Stream the whole file through the model. Returns (scores, embeds|None).
+
+    legacy_ch9=True computes the ch9 delta at the k-mer centre (attrs['center_idx'])
+    rather than the window centre, to MATCH models trained before the ch9 fix. Use
+    it for pipeline1/results2 checkpoints; leave False for models trained after the
+    fix (e.g. the pipeline3 ablation arms).
+    """
     from model import PileupDataset
     with h5py.File(h5_path, 'r') as h:
         n = h['tensors'].shape[0]
     ds = PileupDataset([str(h5_path)], np.arange(n, dtype=np.int64), [n],
                        augment=False, seed=0, signal_noise_std=0.0,
-                       delta_channels=True, preload=False)
+                       delta_channels=True, preload=False,
+                       legacy_ch9_center=legacy_ch9)
     from torch.utils.data import DataLoader
     from model import make_loader_kwargs, _worker_init_fn
     try:
@@ -133,6 +141,9 @@ def main():
     ap.add_argument('--batch', type=int, default=512)
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--save-embeddings', action='store_true')
+    ap.add_argument('--legacy-ch9', action='store_true',
+                    help='compute ch9 at the k-mer centre, to match models trained '
+                         'before the ch9 fix (pipeline1 / results2)')
     a = ap.parse_args()
 
     ckpt = Path(a.checkpoint) if a.checkpoint else CHECKPOINT_FOR.get(a.dataset)
@@ -143,7 +154,10 @@ def main():
     print(f"scoring {a.dataset}\n  h5   = {a.h5}\n  ckpt = {ckpt}\n  dev  = {device}",
           flush=True)
 
-    s, emb = score(a.h5, ckpt, device, a.batch, a.workers, a.save_embeddings)
+    if a.legacy_ch9:
+        print("  ch9: LEGACY (k-mer centre) to match a pre-fix checkpoint", flush=True)
+    s, emb = score(a.h5, ckpt, device, a.batch, a.workers, a.save_embeddings,
+                   legacy_ch9=a.legacy_ch9)
 
     with h5py.File(a.h5, 'r') as h:
         contigs = [x.decode() if isinstance(x, bytes) else str(x)
