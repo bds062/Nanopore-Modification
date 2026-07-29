@@ -93,8 +93,11 @@ def evaluate(model, loader, device, thr=0.5):
     return out
 
 
-def train_one(held, files, mods, args, device):
-    """Train holding out `held`; test on it. Returns held-out metrics."""
+def train_one(held, files, mods, args, device, seed=0):
+    """Train holding out `held`; select best epoch on a validation split drawn
+    from the training modifications; report the held-out test at that epoch."""
+    import copy
+    from torch.utils.data import Subset
     train_files = [f for f, m in zip(files, mods) if m != held]
     train_mods = [m for m in mods if m != held]
     test_file = files[mods.index(held)]
@@ -102,27 +105,40 @@ def train_one(held, files, mods, args, device):
     n_dom = len(train_mods)
 
     W, C, _, _ = h5_attrs(files[0])
-    ds_tr = H5Pileup(train_files, [dom_ids[m] for m in train_mods], cap=args.cap)
-    ds_te = H5Pileup([test_file], [0], cap=args.cap)
+    ds_all = H5Pileup(train_files, [dom_ids[m] for m in train_mods],
+                      cap=args.cap, seed=seed)
+    ds_te = H5Pileup([test_file], [0], cap=args.cap, seed=seed)
 
-    # pos_weight from the training label balance
-    ntr = len(ds_tr); npos = sum(1 for e in ds_tr.entries
-                                 if float(ds_tr.handle(e[0])["labels"][e[1]]) > 0)
-    pos_w = torch.tensor([(ntr - npos) / max(1, npos)], dtype=torch.float32).to(device)
+    # split the training pool into train/val (val is in-distribution, for
+    # best-epoch selection; the held-out modification stays untouched as test)
+    n = len(ds_all)
+    perm = np.random.default_rng(seed).permutation(n)
+    n_val = max(args.batch, n // 10)
+    val_idx, tr_idx = perm[:n_val], perm[n_val:]
 
-    dl_tr = DataLoader(ds_tr, batch_size=args.batch, shuffle=True,
+    tr_lab = np.array([float(ds_all.handle(ds_all.entries[i][0])
+                             ["labels"][ds_all.entries[i][1]]) for i in tr_idx])
+    npos = int((tr_lab > 0).sum())
+    pos_w = torch.tensor([(len(tr_idx) - npos) / max(1, npos)],
+                         dtype=torch.float32).to(device)
+
+    dl_tr = DataLoader(Subset(ds_all, tr_idx), batch_size=args.batch, shuffle=True,
                        num_workers=args.workers, pin_memory=True, drop_last=True)
+    dl_val = DataLoader(Subset(ds_all, val_idx), batch_size=args.batch,
+                        shuffle=False, num_workers=args.workers, pin_memory=True)
     dl_te = DataLoader(ds_te, batch_size=args.batch, shuffle=False,
                        num_workers=args.workers, pin_memory=True)
 
+    torch.manual_seed(seed)
     model = DANN(in_ch=C, window=W, n_domains=n_dom).to(device)
-    print(f"[hold={held}] train {ntr} ({npos} pos), domains={train_mods}, "
-          f"model params={model.n_params():,}")
+    print(f"[hold={held} seed={seed}] train {len(tr_idx)} ({npos} pos), "
+          f"val {len(val_idx)}, domains={train_mods}, params={model.n_params():,}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_w)
     ce = nn.CrossEntropyLoss()
 
     total = args.epochs * max(1, len(dl_tr)); step = 0
+    best_val = -1.0; best_state = None
     for ep in range(1, args.epochs + 1):
         model.train()
         for x, y, d in dl_tr:
@@ -132,9 +148,12 @@ def train_one(held, files, mods, args, device):
             loss = bce(logit, y) + ce(dom, d)
             opt.zero_grad(); loss.backward(); opt.step()
             step += 1
-        m = evaluate(model, dl_te, device)
-        print(f"  [{held}] epoch {ep:2d}  P={m['precision']:.3f} R={m['recall']:.3f} "
-              f"F1={m['f1']:.3f} AUPRC={m['auprc']:.3f}  grl={lam:.2f}")
+        vm = evaluate(model, dl_val, device)
+        if vm["auprc"] == vm["auprc"] and vm["auprc"] > best_val:
+            best_val = vm["auprc"]; best_state = copy.deepcopy(model.state_dict())
+        print(f"  [{held}] ep {ep:2d}  val_AUPRC={vm['auprc']:.3f} (best {best_val:.3f})")
+    if best_state is not None:
+        model.load_state_dict(best_state)
     return evaluate(model, dl_te, device)
 
 
@@ -149,6 +168,8 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--holdouts", default="5mC,5hmC,6mA",
                     help="modifications to leave out, comma-separated")
+    ap.add_argument("--seeds", default="0,1,2",
+                    help="seeds to average over, comma-separated")
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -161,26 +182,39 @@ def main():
         W, C, n, pos = h5_attrs(f)
         print(f"  {os.path.basename(f)}: {n} images, {pos} positive, W={W}, C={C}")
 
-    results = {}
+    seeds = [int(s) for s in args.seeds.split(",")]
+    agg = {}   # held -> {metric: (mean, std)}
     for held in args.holdouts.split(","):
-        results[held] = train_one(held, files, mods, args, device)
-        print(f"=== leave-out {held}: {results[held]} ===\n")
+        runs = []
+        for seed in seeds:
+            m = train_one(held, files, mods, args, device, seed=seed)
+            runs.append(m)
+            print(f"=== leave-out {held} seed {seed}: {m} ===")
+        agg[held] = {k: (float(np.nanmean([r[k] for r in runs])),
+                         float(np.nanstd([r[k] for r in runs])))
+                     for k in ["precision", "recall", "f1", "auprc"]}
+        print(f"### {held} mean over {len(seeds)} seeds: "
+              f"P={agg[held]['precision'][0]:.3f}+/-{agg[held]['precision'][1]:.3f} "
+              f"AUPRC={agg[held]['auprc'][0]:.3f}+/-{agg[held]['auprc'][1]:.3f}\n")
 
-    # Fig 3b-style summary (precision per held-out modification)
+    # Fig 3b-style summary (precision per held-out modification, mean +/- std)
     with open(os.path.join(args.out_dir, "lodo_metrics.tsv"), "w") as fh:
-        fh.write("held_out\tprecision\trecall\tf1\tauprc\n")
-        for h, m in results.items():
-            fh.write(f"{h}\t{m['precision']:.4f}\t{m['recall']:.4f}\t"
-                     f"{m['f1']:.4f}\t{m['auprc']:.4f}\n")
+        fh.write("held_out\tprecision\tprecision_std\tauprc\tauprc_std\trecall\tf1\n")
+        for h, m in agg.items():
+            fh.write(f"{h}\t{m['precision'][0]:.4f}\t{m['precision'][1]:.4f}\t"
+                     f"{m['auprc'][0]:.4f}\t{m['auprc'][1]:.4f}\t"
+                     f"{m['recall'][0]:.4f}\t{m['f1'][0]:.4f}\n")
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
-        hs = list(results.keys()); precs = [results[h]["precision"] for h in hs]
+        hs = list(agg.keys())
+        precs = [agg[h]["precision"][0] for h in hs]
+        errs = [agg[h]["precision"][1] for h in hs]
         plt.figure(figsize=(6, 4))
-        plt.bar(hs, precs, color="#4C78A8")
+        plt.bar(hs, precs, yerr=errs, capsize=5, color="#4C78A8")
         plt.ylim(0, 1); plt.ylabel("Precision (held-out)")
-        plt.title("Leave-one-modification-out (ORCA Fig 3b analog)")
+        plt.title(f"Leave-one-modification-out (ORCA Fig 3b analog, {len(seeds)} seeds)")
         for i, p in enumerate(precs):
-            plt.text(i, p + 0.02, f"{p:.2f}", ha="center")
+            plt.text(i, p + errs[i] + 0.02, f"{p:.2f}", ha="center")
         plt.tight_layout()
         plt.savefig(os.path.join(args.out_dir, "lodo_precision.png"), dpi=150)
         print("Saved lodo_precision.png + lodo_metrics.tsv")
