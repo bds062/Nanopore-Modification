@@ -50,6 +50,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import run_pipeline as R
+from model import ProjectionHead          # SupCon head reused from deepmod/model.py
 
 IN_CH, H, W = 11, 31, 210
 D_MODEL = 96   # identical to ConvFormer-v1 — keeps the transformer an exact match
@@ -131,19 +132,34 @@ def grad_reverse(x, lambd):
 
 class ConvFormerV2(nn.Module):
     """
-    With dann_lambda > 0, a sequence-context adversary is attached to the pooled
-    representation via a gradient-reversal layer. It predicts the FLANKING
-    reference bases (offsets ±1..±flank from the candidate; the candidate base
-    itself is NOT predicted, since 6mA=A / 5mC=C is legitimate signal). Gradient
-    reversal drives the shared representation to be UNINFORMATIVE about the motif
-    context, so the model cannot fire on a recognition motif (e.g. GATC) from
-    sequence alone and must rely on the modification signal. The adversary reads
-    the flanking-base targets straight from the input tensor's reference row, so
-    no extra labels are needed; forward() returns (logit, adv_loss) when active.
+    Two optional auxiliary training objectives hang off the pooled 96-d
+    representation `rep` (both no-ops at eval — forward() returns the logit
+    alone unless training AND an auxiliary is active):
+
+    * dann_lambda > 0 — a sequence-context adversary via a gradient-reversal
+      layer. It predicts the FLANKING reference bases (offsets ±1..±flank from
+      the candidate; the candidate base itself is NOT predicted, since 6mA=A /
+      5mC=C is legitimate signal). Gradient reversal drives `rep` to be
+      UNINFORMATIVE about the motif context, so the model cannot fire on a
+      recognition motif (e.g. GATC) from sequence alone. Targets are read
+      straight from the input tensor's reference row, so no extra labels.
+
+    * supcon_dim > 0 — a supervised-contrastive projection head (ProjectionHead
+      from deepmod/model.py) maps `rep` onto an L2-normalised sphere. The
+      SupCon loss itself is computed in the training loop (it needs the batch
+      labels, which forward() does not receive), so forward() only RETURNS the
+      projection embedding. SupCon pulls together every modified site and every
+      unmodified site regardless of source dataset, forcing the encoder to find
+      signal-level features shared across datasets rather than memorising a
+      dataset/motif-specific context — the direct counter to motif memorisation.
+
+    When training and any auxiliary is active, forward() returns
+    (logit, aux) where aux is a dict with keys among {'adv_loss', 'proj'}.
     """
     def __init__(self, in_ch=IN_CH, h=H, w=W, d_model=D_MODEL, nhead=4,
                  layers=2, dim_ff=192, dropout=0.4,
-                 dann_lambda=0.0, dann_flank=4, window_positions=21):
+                 dann_lambda=0.0, dann_flank=4, window_positions=21,
+                 supcon_dim=0, sad_dim=0):
         super().__init__()
         self.read_encoder = ReadConvEncoderV2(in_ch, d_model)
         self.pos = nn.Parameter(torch.zeros(1, h, d_model))
@@ -154,6 +170,25 @@ class ConvFormerV2(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(d_model, 1))
         nn.init.trunc_normal_(self.pos, std=0.02)
+
+        # --- supervised-contrastive projection head ---
+        self.supcon_dim = int(supcon_dim)
+        self.proj = (ProjectionHead(d_model, d_model, self.supcon_dim)
+                     if self.supcon_dim > 0 else None)
+
+        # --- Deep SAD one-class head (Ruff et al. 2019) ---
+        # Maps rep -> a small space where UNMODIFIED sites are pulled to a fixed
+        # centre and (seen) modifications are pushed away, so at test an UNSEEN
+        # chemistry also lands far from the centre. bias=False (Deep SVDD hygiene:
+        # a bias lets the net map everything to the centre, the trivial solution).
+        # The anomaly score used at inference is ||sad_head(rep) - sad_center||.
+        # sad_center is a buffer (fixed after init, saved in the checkpoint).
+        self.sad_dim = int(sad_dim)
+        self.sad_head = (nn.Linear(d_model, self.sad_dim, bias=False)
+                         if self.sad_dim > 0 else None)
+        if self.sad_head is not None:
+            self.register_buffer('sad_center', torch.zeros(self.sad_dim))
+        self._sad = None                       # last sad embedding (set in forward)
 
         # --- sequence-context adversary ---
         self.dann_lambda = float(dann_lambda)
@@ -193,14 +228,29 @@ class ConvFormerV2(nn.Module):
         rep = self.norm(pooled)
         logit = self.head(rep)
 
-        if self.dann_lambda > 0 and self.training:
-            tgt, valid = self._flank_targets(x)                  # (B,F)
-            adv_logits = self.adv(grad_reverse(rep, self.dann_lambda))
-            adv_logits = adv_logits.view(B, len(self.flank_cols), 4)
-            ce = F.cross_entropy(adv_logits.reshape(-1, 4), tgt.reshape(-1),
-                                 reduction='none').view(B, -1)
-            adv_loss = (ce * valid.float()).sum() / valid.float().sum().clamp(min=1.0)
-            return logit, adv_loss
+        # Always compute the SAD embedding when the head exists, so it is available
+        # at eval (for centre init and anomaly scoring) as well as in training.
+        if self.sad_head is not None:
+            self._sad = self.sad_head(rep)
+
+        if self.training and (self.dann_lambda > 0 or self.proj is not None
+                              or self.sad_head is not None):
+            aux = {}
+            if self.dann_lambda > 0:
+                tgt, valid = self._flank_targets(x)              # (B,F)
+                adv_logits = self.adv(grad_reverse(rep, self.dann_lambda))
+                adv_logits = adv_logits.view(B, len(self.flank_cols), 4)
+                ce = F.cross_entropy(adv_logits.reshape(-1, 4), tgt.reshape(-1),
+                                     reduction='none').view(B, -1)
+                aux['adv_loss'] = ((ce * valid.float()).sum()
+                                   / valid.float().sum().clamp(min=1.0))
+            if self.proj is not None:
+                # L2-normalised contrastive embedding; the SupCon loss (which
+                # needs the batch labels) is applied in the training loop.
+                aux['proj'] = self.proj(rep)                     # (B, supcon_dim)
+            if self.sad_head is not None:
+                aux['sad'] = self._sad                           # (B, sad_dim)
+            return logit, aux
         return logit
 
 

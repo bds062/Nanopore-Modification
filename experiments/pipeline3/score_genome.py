@@ -64,15 +64,48 @@ def load_model(ckpt, device):
 
     Checkpoints are written by run_pipeline.py as
         {'model_state': ..., 'in_channels': 11, 'val_auprc': ..., 'epoch': ..., 'tag': ...}
-    and test_model.load_model already handles that plus architecture auto-detection,
-    so do not reimplement it here.
+    and test_model.load_model already handles that plus architecture auto-detection.
+
+    Exception: a DANN checkpoint also carries the sequence-context adversary's
+    weights ('adv.*'). The adversary is training-only (forward() returns the logit
+    alone at eval), but the module must exist for a strict load, so rebuild it with
+    dann_lambda>0 rather than dropping the keys silently.
     """
+    raw = torch.load(str(ckpt), map_location=device, weights_only=False)
+    sd = raw['model_state'] if isinstance(raw, dict) and 'model_state' in raw else raw
+    # A DANN checkpoint carries 'adv.*'; a SupCon checkpoint carries 'proj.*'.
+    # Both auxiliaries are training-only (forward() returns the logit alone at
+    # eval), but the submodules must exist for a strict load, so rebuild them.
+    has_adv = any(k.startswith('adv.') for k in sd)
+    has_proj = any(k.startswith('proj.') for k in sd)
+    has_sad = any(k.startswith('sad_head.') for k in sd)
+    if has_adv or has_proj or has_sad:
+        from run_convformer_v2 import ConvFormerV2
+        # infer aux dims from the state dict
+        proj_dim = int(sd['proj.net.2.weight'].shape[0]) if has_proj else 0
+        sad_dim = int(sd['sad_head.weight'].shape[0]) if has_sad else 0
+        model = ConvFormerV2(dropout=0.0,
+                             dann_lambda=1.0 if has_adv else 0.0,  # value irrelevant at eval
+                             supcon_dim=proj_dim, sad_dim=sad_dim)
+        model.load_state_dict(sd)
+        model.to(device).eval()
+        aux = []
+        if has_adv:
+            aux.append('DANN adversary')
+        if has_proj:
+            aux.append(f'SupCon proj dim={proj_dim}')
+        if has_sad:
+            aux.append(f'DeepSAD dim={sad_dim}')
+        print(f"  checkpoint: {' + '.join(aux)} present "
+              f"epoch={raw.get('epoch')} val_auprc={raw.get('val_auprc')}", flush=True)
+        return model, 'convformer_v2'
+
     from test_model import load_model as _load
     model, meta = _load(str(ckpt), device, arch='auto')
     print(f"  checkpoint: tag={meta.get('tag')} epoch={meta.get('epoch')} "
           f"val_auprc={meta.get('val_auprc')}", flush=True)
     model.eval()
-    return model
+    return model, meta['arch']
 
 
 def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False,
@@ -99,17 +132,25 @@ def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False,
     except Exception:
         loader = DataLoader(ds, batch_size=batch, shuffle=False, num_workers=workers)
 
-    model = load_model(ckpt, device)
+    model, arch = load_model(ckpt, device)
 
-    # ConvFormerV2 has no forward_features; its penultimate representation is
-    # self.norm(pooled), which is exactly the INPUT to self.head. Capture it with a
-    # forward hook rather than reimplementing forward() (which would drift).
+    # Where the 512/96-dim penultimate embedding lives differs by architecture:
+    #   - ConvFormerV2/ConvFormer: self.head has no internal pooling, so the
+    #     INPUT to self.head (= self.norm(pooled)) is already the flat embedding.
+    #   - PileupInceptionV3 ('inception'): self.head is
+    #     Sequential(AdaptiveAvgPool2d, Flatten, Dropout, Linear) -- the pool
+    #     is INSIDE head, so hooking head itself would capture the pre-pool
+    #     (B, 512, 1, W) conv feature map, not an embedding. Hook head[3] (the
+    #     final Linear) instead; its INPUT is the pooled+flattened+dropout
+    #     (B, 512) embedding (see model.py's dual-output forward for SupCon,
+    #     which taps the identical point via self.head[2](...)).
     cap = {}
     hook = None
     if want_embed:
         def _grab(_mod, inp, _out):
             cap['e'] = inp[0].detach()
-        hook = model.head.register_forward_hook(_grab)
+        target = model.head[3] if arch == 'inception' else model.head
+        hook = target.register_forward_hook(_grab)
 
     out = np.empty(n, dtype=np.float32)
     embeds = [] if want_embed else None

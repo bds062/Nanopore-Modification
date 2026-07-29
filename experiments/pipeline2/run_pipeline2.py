@@ -124,6 +124,10 @@ def wandb_init(fold: str, hp, train_names, test_names):
             config={
                 'fold': fold, 'run_id': run_id, 'architecture': 'ConvFormerV2',
                 'train_datasets': train_names, 'external_test_datasets': test_names,
+                'supcon_dim': int(os.environ.get('SUPCON_DIM', '0')),
+                'supcon_weight': float(os.environ.get('SUPCON_WEIGHT', '0.1')),
+                'supcon_temp': float(os.environ.get('SUPCON_TEMP', '0.07')),
+                'dann_lambda': float(os.environ.get('DANN_LAMBDA', '0')),
                 **{k: getattr(hp, k) for k in dir(hp) if not k.startswith('_')},
             },
             settings=wandb.Settings(init_timeout=180, start_method='thread'),
@@ -369,7 +373,17 @@ def main():
     dann_lambda = float(os.environ.get('DANN_LAMBDA', '0'))
     if dann_lambda > 0:
         print(f"  [DANN] sequence-context adversary, lambda={dann_lambda}", flush=True)
-    model_factory = lambda: ConvFormerV2(dropout=hp.dropout, dann_lambda=dann_lambda)
+    # Supervised-contrastive projection head. Off unless SUPCON_DIM>0; when on,
+    # its loss weight/temperature come from SUPCON_WEIGHT/SUPCON_TEMP (read in
+    # run_pipeline.train_one_model). Pulls all modified sites' embeddings together
+    # and away from unmodified — a direct counter to dataset/motif memorisation.
+    supcon_dim = int(os.environ.get('SUPCON_DIM', '0'))
+    if supcon_dim > 0:
+        print(f"  [SupCon] projection head, dim={supcon_dim} "
+              f"weight={os.environ.get('SUPCON_WEIGHT', '0.1')} "
+              f"temp={os.environ.get('SUPCON_TEMP', '0.07')}", flush=True)
+    model_factory = lambda: ConvFormerV2(dropout=hp.dropout, dann_lambda=dann_lambda,
+                                         supcon_dim=supcon_dim)
     rows = []
 
     def eval_and_record(model, run, test_name, g, idx, held_out=''):

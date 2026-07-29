@@ -38,8 +38,12 @@ done
 PIPE=/fs/cbcb-scratch/bds062/results/deepmod_full_pipeline2
 OUTDIR=${OUTDIR:-${PIPE}/results1}
 LOGDIR=${PIPE}/logs
-DRIVER=${PIPE}/run_pipeline2.py
-COLLECT=${PIPE}/collect2.py
+# Driver/collect come from THIS repo, not the scratch copies: run_pipeline2.py
+# resolves its imports via Path(__file__).parents[2], which is only the repo
+# when the file it runs *is* the repo file. (Overridable for debugging.)
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRIVER=${DRIVER:-${REPO_DIR}/run_pipeline2.py}
+COLLECT=${COLLECT:-${REPO_DIR}/collect2.py}
 PYTHON=/fs/nexus-scratch/bds062/envs/mod/bin/python
 CONDA_INIT="source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && conda activate /fs/nexus-scratch/bds062/envs/mod"
 
@@ -76,7 +80,10 @@ DEP_ARG=""
 
 JIDS=()
 for FOLD in "${FOLDS[@]}"; do
-    WRAP="${CONDA_INIT} && MANIFEST=${MANIFEST:-} PILEUP_PRELOAD=0 PILEUP_WORKERS=8 ${PYTHON} ${DRIVER} --fold ${FOLD} --out-dir ${OUTDIR} ${EPOCHS_ARG}"
+    WRAP="${CONDA_INIT} && MANIFEST=${MANIFEST:-} PILEUP_PRELOAD=0 PILEUP_WORKERS=8 \
+DANN_LAMBDA=${DANN_LAMBDA:-0} SUPCON_DIM=${SUPCON_DIM:-0} \
+SUPCON_WEIGHT=${SUPCON_WEIGHT:-0.1} SUPCON_TEMP=${SUPCON_TEMP:-0.07} \
+${PYTHON} ${DRIVER} --fold ${FOLD} --out-dir ${OUTDIR} ${EPOCHS_ARG}"
     JID=$(submit "${SLURM_COMMON} ${DEP_ARG} \
         --job-name=fp2_${FOLD} \
         --output=${LOGDIR}/${FOLD}_%j.out --error=${LOGDIR}/${FOLD}_%j.out \

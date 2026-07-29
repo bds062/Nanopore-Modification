@@ -279,6 +279,7 @@ class PileupDataset(Dataset):
                  delta_channels: bool = True,
                  preload: bool = False,
                  mask_flank_bases: bool = False,
+                 mask_all_bases: bool = False,
                  legacy_ch9_center: bool = False):
         self.h5_paths   = h5_paths
         self.indices    = indices
@@ -321,6 +322,13 @@ class PileupDataset(Dataset):
             # let a model memorise a recognition motif such as GATC and fire on
             # it regardless of the signal. See experiments/pipeline3.
             self.mask_flank_bases = mask_flank_bases
+        # Optionally blank the base one-hots (ch 2-5) EVERYWHERE, including the
+        # candidate position: the model then has NO nucleotide-identity input and
+        # must detect a modification from signal alone (raw current, dwell, strand,
+        # mapq, matches_ref, deltas). Strongest test of chemistry/context-agnostic
+        # detection — a modification on an unseen base cannot be found via "which
+        # base is this" if no base identity is available.
+        self.mask_all_bases = mask_all_bases
 
         if preload:
             self._preload_to_memory()
@@ -418,6 +426,11 @@ class PileupDataset(Dataset):
             keep = x[2:6, :, cs:ce].copy()
             x[2:6, :, :] = 0.0
             x[2:6, :, cs:ce] = keep
+
+        # Blank ALL base-identity channels (is_A/C/G/T) so the model sees no
+        # nucleotide identity at all — signal-only detection.
+        if self.mask_all_bases:
+            x[2:6, :, :] = 0.0
 
         if self.augment:
             H = x.shape[1]

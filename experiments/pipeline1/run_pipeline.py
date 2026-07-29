@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from model import (
     PileupDataset, PileupInceptionV3, run_inference, aggregate_by_position,
     make_position_keys, source_position_keys, binary_labels,
-    make_loader_kwargs, set_seed,
+    make_loader_kwargs, set_seed, SupConLoss,
 )
 from mod_types import build_umces_mod_map, UMCES_MODS
 
@@ -215,14 +215,35 @@ def make_ds(group, idx, augment, hp):
     # the tensor. The candidate base itself is kept: it is legitimate evidence
     # (6mA only occurs at A, 5mC only at C).
     mask_flank = os.environ.get('PILEUP_MASK_FLANK', '0') == '1'
+    # PILEUP_MASK_BASES=1 blanks ALL base-identity channels (is_A/C/G/T): the model
+    # sees no nucleotide identity and must detect a modification from signal alone.
+    mask_all = os.environ.get('PILEUP_MASK_BASES', '0') == '1'
     return PileupDataset(group.paths, idx, group.file_sizes,
                          augment=augment, seed=hp.seed,
                          signal_noise_std=hp.signal_noise,
                          delta_channels=True, preload=preload,
-                         mask_flank_bases=mask_flank)
+                         mask_flank_bases=mask_flank, mask_all_bases=mask_all)
 
 
-def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=None):
+def _sad_val_auroc(model, val_loader, device):
+    """Deep-SAD anomaly-distance AUROC over a val loader (labels vs ||sad-centre||).
+    Used for model selection when BCE_WEIGHT=0, since the classification head is
+    untrained noise in that mode (mirrors run_svdd_loco.py's pure-SVDD selection)."""
+    model.eval(); ds, ys = [], []
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            model(xb.to(device, non_blocking=True))
+            d = ((model._sad - model.sad_center) ** 2).sum(1).sqrt().cpu().numpy()
+            ds.append(d); ys.append(yb.numpy())
+    model.train()
+    d = np.concatenate(ds); y = np.concatenate(ys)
+    return float(roc_auc_score(y, d)) if len(np.unique(y)) > 1 else float('nan')
+
+
+def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=None,
+                    init_state=None):
+    """init_state: optional state_dict to warm-start from (curriculum stage 2
+    resumes from stage 1's weights). None = fresh init (default)."""
     print(f"\n{'='*66}\n  TRAIN [{tag}]  train_images={len(train_idx):,}", flush=True)
     sub_train, val_idx = carve_val(train_idx, group, hp.val_frac, hp.seed)
     train_labels = group.labels[sub_train]
@@ -240,7 +261,59 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
 
     model = (model_factory() if model_factory is not None
              else PileupInceptionV3(in_channels=11, dropout=hp.dropout)).to(device)
+    if init_state is not None:
+        model.load_state_dict({k: v.to(device) for k, v in init_state.items()})
+        print(f"  warm-started from prior stage ({len(init_state)} tensors)", flush=True)
     crit  = nn.BCEWithLogitsLoss(pos_weight=pw)
+
+    # BCE_WEIGHT=0 disables the classification loss entirely -- the model is then
+    # trained ONLY by whichever of SupCon / Deep SAD are active (still label-driven,
+    # just via a metric-learning objective instead of a cross-entropy decision
+    # boundary). The classification head itself remains in the graph (untrained,
+    # effectively random) -- its logit/AUPRC is meaningless when bce_w==0, so model
+    # selection below switches to the Deep-SAD anomaly val-AUROC instead.
+    bce_w = float(os.environ.get('BCE_WEIGHT', '1.0'))
+    if bce_w != 1.0:
+        print(f"  [BCE] weight={bce_w}" +
+              ("  (classification loss DISABLED; representation trained by "
+               "SupCon/SAD only)" if bce_w == 0 else ""), flush=True)
+
+    # Supervised-contrastive auxiliary loss: active only when the model exposes a
+    # projection head (ConvFormerV2(supcon_dim>0)). Weight/temperature are training
+    # hyperparameters read from the environment so the architecture stays fixed.
+    #   total_loss = BCE + adv_loss(DANN) + SUPCON_WEIGHT * SupCon(proj, y)
+    supcon_on = getattr(model, 'proj', None) is not None
+    supcon_w = float(os.environ.get('SUPCON_WEIGHT', '0.1')) if supcon_on else 0.0
+    supcon_crit = SupConLoss(float(os.environ.get('SUPCON_TEMP', '0.07'))) if supcon_on else None
+    if supcon_on:
+        print(f"  [SupCon] proj_dim={model.supcon_dim}  weight={supcon_w}  "
+              f"temp={os.environ.get('SUPCON_TEMP', '0.07')}", flush=True)
+
+    # Deep SAD one-class loss (active when the model exposes a sad_head): normals
+    # (unmodified) are pulled to a fixed centre c, labelled anomalies (the seen
+    # modifications) are pushed away via inverse distance, so an UNSEEN chemistry at
+    # test also lands far from c. Inference score = ||sad_head(rep) - c||.
+    sad_on = getattr(model, 'sad_head', None) is not None
+    sad_w = float(os.environ.get('SAD_WEIGHT', '1.0')) if sad_on else 0.0
+    sad_eta = float(os.environ.get('SAD_ETA', '1.0'))
+    if sad_on:
+        model.eval(); acc = []; seen = 0
+        with torch.no_grad():
+            for xb, yb in train_loader:
+                model(xb.to(device, non_blocking=True))
+                m = (yb == 0)
+                if m.any():
+                    acc.append(model._sad[m.to(device)].detach().cpu())
+                    seen += int(m.sum())
+                if seen >= 8000:
+                    break
+        c = torch.cat(acc, 0).mean(0)
+        c[c.abs() < 1e-6] = 1e-6              # no centre component exactly at 0
+        model.sad_center.copy_(c.to(device))
+        model.train()
+        print(f"  [DeepSAD] sad_dim={model.sad_dim} weight={sad_w} eta={sad_eta} "
+              f"centre from {seen:,} normals  ||c||={c.norm():.3f}", flush=True)
+
     opt   = torch.optim.AdamW(model.parameters(), lr=hp.lr, weight_decay=hp.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='max', factor=0.5,
                                                        patience=7, min_lr=1e-6)
@@ -255,20 +328,37 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for ep in range(1, hp.epochs + 1):
-        model.train(); t0 = time.time(); eloss = eseen = eadv = 0
+        model.train(); t0 = time.time(); eloss = eseen = eadv = esup = esad = 0
         for x, y in train_loader:
             x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
             opt.zero_grad()
             out = model(x)
-            # A DANN-enabled model returns (logit, adversary_loss) in train mode.
-            # The gradient-reversal layer already carries the sign, so the two
-            # losses are simply summed; the adversary CE is logged separately.
+            # An auxiliary-enabled model returns (logit, aux) in train mode, where
+            # aux is a dict with keys among {'adv_loss', 'proj'}:
+            #   'adv_loss' — DANN adversary CE; the gradient-reversal layer already
+            #                carries the sign, so it is simply added.
+            #   'proj'     — L2-normalised SupCon embedding; the contrastive loss is
+            #                computed here because it needs the batch labels y.
             if isinstance(out, tuple):
-                logit, adv_loss = out
-                loss = crit(logit.squeeze(1), y) + adv_loss
-                eadv += float(adv_loss) * len(y)
+                logit, aux = out
+                loss = bce_w * crit(logit.squeeze(1), y)
+                if 'adv_loss' in aux:
+                    loss = loss + aux['adv_loss']
+                    eadv += float(aux['adv_loss']) * len(y)
+                if 'proj' in aux and supcon_w > 0:
+                    sc = supcon_crit(aux['proj'], y.long())
+                    loss = loss + supcon_w * sc
+                    esup += float(sc) * len(y)
+                if 'sad' in aux and sad_w > 0:
+                    d2 = ((aux['sad'] - model.sad_center) ** 2).sum(1)
+                    nmask = (y == 0); amask = (y == 1)
+                    ln = d2[nmask].mean() if nmask.any() else d2.new_zeros(())
+                    la = (1.0 / (d2[amask] + 1e-6)).mean() if amask.any() else d2.new_zeros(())
+                    sadl = ln + sad_eta * la
+                    loss = loss + sad_w * sadl
+                    esad += float(sadl) * len(y)
             else:
-                loss = crit(out.squeeze(1), y)
+                loss = bce_w * crit(out.squeeze(1), y)
             loss.backward()
             if hp.grad_clip > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), hp.grad_clip)
@@ -278,19 +368,28 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
             eloss += loss.item() * len(y); eseen += len(y)
         tr_loss = eloss / max(eseen, 1)
 
-        yt, yp = run_inference(model, val_loader, device)
-        vt, vp, _ = aggregate_by_position(yt, yp, val_keys)
-        vauprc = (average_precision_score(vt, vp) if int(vt.sum()) > 0
-                  else float(np.mean(1.0 - vp)))
+        if bce_w == 0 and sad_on:
+            # classification head is untrained noise -- select on Deep-SAD anomaly
+            # val-AUROC instead (same trick as run_svdd_loco.py's pure-SVDD selection).
+            vauprc = _sad_val_auroc(model, val_loader, device)
+        else:
+            yt, yp = run_inference(model, val_loader, device)
+            vt, vp, _ = aggregate_by_position(yt, yp, val_keys)
+            vauprc = (average_precision_score(vt, vp) if int(vt.sum()) > 0
+                      else float(np.mean(1.0 - vp)))
         if warm is None or gstep > hp.warmup_steps:
             sched.step(vauprc)
         tr_hist.append(tr_loss); ap_hist.append(vauprc)
         va_hist.append(vauprc)
         adv_str = f"adv_ce={eadv/max(eseen,1):.4f}  " if eadv else ""
-        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  {adv_str}"
-              f"val_AUPRC={vauprc:.4f}  lr={opt.param_groups[0]['lr']:.2e}  "
+        sup_str = f"supcon={esup/max(eseen,1):.4f}  " if esup else ""
+        sad_str = f"sad={esad/max(eseen,1):.4f}  " if esad else ""
+        sel_label = "val_anomAUROC" if (bce_w == 0 and sad_on) else "val_AUPRC"
+        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  {adv_str}{sup_str}{sad_str}"
+              f"{sel_label}={vauprc:.4f}  lr={opt.param_groups[0]['lr']:.2e}  "
               f"{time.time()-t0:.1f}s", flush=True)
         _wandb_log({f'{tag}/train_loss': tr_loss, f'{tag}/val_auprc': vauprc,
+                    f'{tag}/supcon': esup / max(eseen, 1),
                     f'{tag}/lr': opt.param_groups[0]['lr'], f'{tag}/epoch': ep})
 
         if vauprc > best_auprc:
