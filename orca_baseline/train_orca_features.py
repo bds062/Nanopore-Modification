@@ -22,6 +22,9 @@ from torch.utils.data import TensorDataset, DataLoader, Subset
 
 from model import Extractor, grad_reverse   # ORCA architecture
 
+# avoid a oneDNN "could not create a primitive" error on some torch builds (LSTM CPU)
+torch.backends.mkldnn.enabled = False
+
 MODS = ["control", "5mC", "5hmC", "6mA"]
 IDX = {"id", "position", "kmer", "depth"}
 
