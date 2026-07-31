@@ -29,10 +29,12 @@ for COND in $CONDITIONS; do
     $SAM sort -@ $T -o $W/$COND.sorted.bam $DATA/basecalls/$COND.bam
     $SAM index $W/$COND.sorted.bam
 
-    # f5c index + eventalign (R10 DNA)
+    # f5c index + eventalign (R10 DNA). --min-recalib-events 25: the synthetic
+    # constructs are only ~155bp, so the default (200) fails calibration on most
+    # short reads; 25 recovers ~93% of reads (vs ~13% at the default).
     $F5C index --slow5 $W/$COND.blow5 $W/$COND.fastq
-    $F5C eventalign --pore r10 --signal-index --scale-events --collapse-events \
-        --secondary=no -t $T \
+    $F5C eventalign --pore r10 --min-recalib-events 25 --signal-index --scale-events \
+        --collapse-events --secondary=no -t $T \
         --slow5 $W/$COND.blow5 --reads $W/$COND.fastq \
         --bam $W/$COND.sorted.bam --genome $REF \
         --summary $W/$COND.summary > $W/$COND.eventalign 2> $W/eventalign.log
