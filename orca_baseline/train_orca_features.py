@@ -78,8 +78,27 @@ def grl_lambda(step, total, gamma=10.0):
     return 2.0 / (1.0 + np.exp(-gamma * p)) - 1.0
 
 
+METRICS = ["precision", "recall", "f1", "auprc", "pos_rate", "lift", "prec_at_r30",
+           "rank99", "eff_rank"]
+
+
+def prec_at_recall(y, p, target=0.30):
+    """Precision at the lowest threshold that still reaches `target` recall.
+
+    ORCA reports precision in the main paper at a recall of roughly 0.25-0.40
+    (their supplementary recall panels), while our class-weighted loss puts us
+    at recall 0.7+. Comparing precision at a fixed 0.5 threshold therefore
+    compares two different operating points; this reads precision off the PR
+    curve at ORCA's recall instead.
+    """
+    from sklearn.metrics import precision_recall_curve
+    prec, rec, _ = precision_recall_curve(y, p)
+    ok = rec >= target
+    return float(prec[ok].max()) if ok.any() else float("nan")
+
+
 @torch.no_grad()
-def evaluate(model, loader, device, thr=0.5):
+def evaluate(model, loader, device, thr=0.5, return_probs=False):
     model.eval(); probs, ys = [], []
     for x, y, _ in loader:
         ce, _ = model(x.to(device), 0.0)
@@ -88,12 +107,51 @@ def evaluate(model, loader, device, thr=0.5):
     from sklearn.metrics import (precision_score, recall_score, f1_score,
                                  average_precision_score)
     if y.sum() == 0:
-        return {k: float("nan") for k in ["precision", "recall", "f1", "auprc"]}
+        out = {k: float("nan") for k in METRICS}
+        return (out, p, y) if return_probs else out
     pred = (p > thr).astype(int)
-    return {"precision": precision_score(y, pred, zero_division=0),
-            "recall": recall_score(y, pred, zero_division=0),
-            "f1": f1_score(y, pred, zero_division=0),
-            "auprc": average_precision_score(y, p)}
+    # a random ranker scores AUPRC == the positive rate, so lift says how much
+    # of the apparent "low AUPRC" is just class imbalance
+    pos_rate = float(y.mean())
+    auprc = average_precision_score(y, p)
+    out = {"precision": precision_score(y, pred, zero_division=0),
+           "recall": recall_score(y, pred, zero_division=0),
+           "f1": f1_score(y, pred, zero_division=0),
+           "auprc": auprc,
+           "pos_rate": pos_rate,
+           "lift": auprc / pos_rate if pos_rate > 0 else float("nan"),
+           "prec_at_r30": prec_at_recall(y, p, 0.30)}
+    return (out, p, y) if return_probs else out
+
+
+@torch.no_grad()
+def embedding_rank(model, loader, device, var=0.99, cap=4000):
+    """Diagnose adversarial collapse of the shared embedding.
+
+    A gradient-reversal head that is too strong drives the extractor output
+    onto a low-dimensional subspace, which looks like good domain confusion but
+    destroys the class signal. Returns how many principal directions carry
+    `var` of the variance, plus the entropy-based effective rank, out of 128*5
+    possible dimensions.
+    """
+    model.eval(); feats = []
+    n = 0
+    for x, _, _ in loader:
+        feats.append(model.extractor(x.to(device)).cpu().numpy())
+        n += len(feats[-1])
+        if n >= cap:
+            break
+    f = np.concatenate(feats)[:cap]
+    f = f - f.mean(0, keepdims=True)
+    s = np.linalg.svd(f, compute_uv=False)
+    ev = s ** 2
+    if ev.sum() <= 0:
+        return {"rank99": 0, "eff_rank": 0.0, "dim": f.shape[1]}
+    ratio = ev / ev.sum()
+    p = ratio[ratio > 0]
+    return {"rank99": int(np.searchsorted(np.cumsum(ratio), var) + 1),
+            "eff_rank": float(np.exp(-(p * np.log(p)).sum())),
+            "dim": int(f.shape[1])}
 
 
 def train_one(held, data, args, device, seed=0):
@@ -151,7 +209,16 @@ def train_one(held, data, args, device, seed=0):
         print(f"  [{held}] ep {ep:2d} val_AUPRC={vm['auprc']:.3f} (best {best_val:.3f})")
     if best_state:
         model.load_state_dict(best_state)
-    return evaluate(model, dl_te, device)
+    er = embedding_rank(model, dl_val, device)
+    print(f"  [{held}] embedding rank99={er['rank99']}/{er['dim']} "
+          f"eff_rank={er['eff_rank']:.1f} (low values = GRL collapse)")
+    m, p, y = evaluate(model, dl_te, device, return_probs=True)
+    m["rank99"], m["eff_rank"] = er["rank99"], er["eff_rank"]
+    # keep the raw scores so precision/recall can be re-read at any operating
+    # point later without retraining
+    np.savez_compressed(os.path.join(args.out_dir, f"probs_{held}_seed{seed}.npz"),
+                        probs=p, labels=y)
+    return m
 
 
 def main():
@@ -184,16 +251,24 @@ def main():
         runs = [train_one(held, data, args, device, seed=s) for s in seeds]
         agg[held] = {k: (float(np.nanmean([r[k] for r in runs])),
                          float(np.nanstd([r[k] for r in runs])))
-                     for k in ["precision", "recall", "f1", "auprc"]}
+                     for k in METRICS}
         print(f"### {held}: P={agg[held]['precision'][0]:.3f} "
-              f"AUPRC={agg[held]['auprc'][0]:.3f}\n")
+              f"R={agg[held]['recall'][0]:.3f} "
+              f"AUPRC={agg[held]['auprc'][0]:.3f} "
+              f"(pos_rate={agg[held]['pos_rate'][0]:.4f}, "
+              f"lift={agg[held]['lift'][0]:.1f}x, "
+              f"P@R30={agg[held]['prec_at_r30'][0]:.3f})\n")
 
     with open(os.path.join(args.out_dir, "lodo_metrics.tsv"), "w") as fh:
-        fh.write("held_out\tprecision\tprecision_std\tauprc\tauprc_std\trecall\tf1\n")
+        fh.write("held_out\tprecision\tprecision_std\tauprc\tauprc_std\trecall\tf1"
+                 "\tpos_rate\tlift\tprec_at_r30\trank99\teff_rank\n")
         for h, m in agg.items():
             fh.write(f"{h}\t{m['precision'][0]:.4f}\t{m['precision'][1]:.4f}\t"
                      f"{m['auprc'][0]:.4f}\t{m['auprc'][1]:.4f}\t"
-                     f"{m['recall'][0]:.4f}\t{m['f1'][0]:.4f}\n")
+                     f"{m['recall'][0]:.4f}\t{m['f1'][0]:.4f}\t"
+                     f"{m['pos_rate'][0]:.4f}\t{m['lift'][0]:.2f}\t"
+                     f"{m['prec_at_r30'][0]:.4f}\t{m['rank99'][0]:.1f}\t"
+                     f"{m['eff_rank'][0]:.1f}\n")
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
         hs = list(agg.keys())
