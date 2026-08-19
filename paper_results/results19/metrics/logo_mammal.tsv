@@ -1,0 +1,2 @@
+fold	test_set	held_out	micro_f1	mod_f1	unmod_f1	macro_f1	mod_prec	mod_rec	auprc	auroc	auroc_sad	threshold	n_pos	n_test
+logo_mammal	zeroshot_mammal	mammal	0.694520	0.184282	0.812071	0.498176	0.106583	0.680000	0.118808	0.751108	0.750542	0.029198	150	2956

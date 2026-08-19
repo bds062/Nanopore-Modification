@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Featurize the 7 ONT-basemod-benchmark (Kulkarni et al. 2024) datasets that
-already have Dorado+Remora alignment AND ground truth ready, using the
-project's current single-strand convention (--strand + --max-reads 15,
-matching rawmod_full_pipeline4's strand15 data): Anabaena_WT, Ecoli_DM,
-Ecoli_DM_MSssI, Ecoli_WT, Tdenticola_WT, HPJ99_WT, arabidopsis.
+Featurize the BENCH:: organisms used by run_matched_loco.py's curriculum pool
+(build_members(), EXTRA_ORGANISMS=1 / INCLUDE_HUMAN=1) that already have
+Dorado+Remora alignment AND ground truth ready, using the project's current
+single-strand convention (--strand + --max-reads 15, matching
+rawmod_full_pipeline4's strand15 data): Anabaena_WT, Ecoli_DM,
+Ecoli_DM_MSssI, Ecoli_WT, Tdenticola_WT, HPJ99_WT, arabidopsis, hg001, hg002.
 
 NOT included:
   - HP26695_WT/WGA: already the source of the HP data in the existing
@@ -17,14 +18,21 @@ NOT included:
 Reuses EXISTING reads_refined.bam / peaks_refined.tsv / gt_modified.bed /
 candidate.bed (produced by the older benchmark pipeline, pipeline/pipeline.sh
 + submit_all.sh) -- only the pod5 path changed (moved to
-/fs/cbcb-lab/storm/bds062/data/benchmark) and the featurization flags are new
-(--strand + --min-mapq 0 per this round's explicit request, vs the old
-pipeline's --min-mapq 60 and both-strand pooling).
+/fs/cbcb-lab/storm/bds062/data/benchmark, or /fs/cbcb-scratch/bds062/data/human
+for hg001/hg002) and the featurization flags are new (--strand + --min-mapq 0
+per this round's explicit request, vs the old pipeline's --min-mapq 60 and
+both-strand pooling).
+
+hg001/hg002 (real bisulfite/EM-seq 5mC ground truth, not motif-derived) need
+--sample-n-sites to pass-1-subsample their much larger candidate pools
+(hg001: 1,730,599 candidates) and --mem=192G -- 96G OOM'd once on this pair.
+Final yield: hg001 2,858 images (79 pos/2,779 neg), hg002 98 images
+(71 pos/27 neg) -- small relative to the bacterial sets, but real human 5mC.
 
 Usage:
   python refeaturize_benchmark.py --dry-run
   python refeaturize_benchmark.py
-  python refeaturize_benchmark.py --only Anabaena_WT_5kHz,arabidopsis
+  python refeaturize_benchmark.py --only Anabaena_WT_5kHz,arabidopsis,hg001
 """
 import argparse
 import subprocess
@@ -36,6 +44,7 @@ CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
              'conda activate /fs/nexus-scratch/bds062/envs/mod')
 
 POD5_ROOT = '/fs/cbcb-lab/storm/bds062/data/benchmark'
+HUMAN_POD5_ROOT = '/fs/cbcb-scratch/bds062/data/human'
 OLD_RESULTS = '/fs/cbcb-scratch/bds062/results/benchmark_results'
 GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
 LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/extern/'
@@ -52,27 +61,30 @@ OUT_ROOT = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features/bench
 COMMON = ('--half-window 10 --L 10 --max-reads 15 --min-mapq 0 '
          '--strand + --uniform-sampling --max-images-per-base 1')
 
-# (name, pod5_subdir, gt_name, min_reads, sample_n_sites, mem)
+# (name, pod5_root, pod5_subdir, gt_name, min_reads, sample_n_sites, mem)
 # min_reads=12 matches the strand15 HP convention (~80% fill of 15).
-# sample_n_sites caps the two datasets with very large candidate pools
-# (Ecoli_DM_MSssI: 731,834 candidate lines; arabidopsis: 8.3M) to avoid the
-# presample_cap=sample_n_sites*3 OOM already hit once this session for HP WGA.
+# sample_n_sites caps the datasets with very large candidate pools
+# (Ecoli_DM_MSssI: 731,834 candidate lines; arabidopsis: 8.3M; hg001: 1.73M) to
+# avoid the presample_cap=sample_n_sites*3 OOM already hit once this session
+# for HP WGA (and again for hg001/hg002 at mem=96G, fixed by mem=192G).
 DATASETS = [
-    ('Anabaena_WT_5kHz', 'bacteria/Anabaena_WT_5kHz/pod5', 'anabaena', 12, None, '48G'),
-    ('Ecoli_DM_5kHz', 'bacteria/Ecoli_DM_5kHz/pod5', 'Ecoli_DM', 12, None, '48G'),
-    ('Ecoli_DM_MSssI_5kHz', 'bacteria/Ecoli_DM_MSssI_5kHz/pod5', 'Ecoli_DM_MSssI', 12, 80000, '96G'),
-    ('Ecoli_WT_5kHz', 'bacteria/Ecoli_WT_5kHz/pod5', 'Ecoli_WT', 12, None, '48G'),
-    ('Tdenticola_WT_5kHz', 'bacteria/Tdenticola_WT_5kHz/pod5', 'tdenticola', 12, None, '48G'),
-    ('HPJ99_WT_5kHz', 'bacteria/HPJ99_WT_5kHz/pod5', 'hpylori_j99', 12, None, '48G'),
-    ('arabidopsis', 'arabidopsis/pod5', 'arabidopsis', 12, 100000, '128G'),
+    ('Anabaena_WT_5kHz', POD5_ROOT, 'bacteria/Anabaena_WT_5kHz/pod5', 'anabaena', 12, None, '48G'),
+    ('Ecoli_DM_5kHz', POD5_ROOT, 'bacteria/Ecoli_DM_5kHz/pod5', 'Ecoli_DM', 12, None, '48G'),
+    ('Ecoli_DM_MSssI_5kHz', POD5_ROOT, 'bacteria/Ecoli_DM_MSssI_5kHz/pod5', 'Ecoli_DM_MSssI', 12, 80000, '96G'),
+    ('Ecoli_WT_5kHz', POD5_ROOT, 'bacteria/Ecoli_WT_5kHz/pod5', 'Ecoli_WT', 12, None, '48G'),
+    ('Tdenticola_WT_5kHz', POD5_ROOT, 'bacteria/Tdenticola_WT_5kHz/pod5', 'tdenticola', 12, None, '48G'),
+    ('HPJ99_WT_5kHz', POD5_ROOT, 'bacteria/HPJ99_WT_5kHz/pod5', 'hpylori_j99', 12, None, '48G'),
+    ('arabidopsis', POD5_ROOT, 'arabidopsis/pod5', 'arabidopsis', 12, 100000, '128G'),
+    ('hg001', HUMAN_POD5_ROOT, 'hg001/pod5', 'hg001', 12, 300000, '192G'),
+    ('hg002', HUMAN_POD5_ROOT, 'hg002/pod5', 'hg002', 12, 300000, '192G'),
 ]
 
 
-def build_cmd(name, pod5_sub, gt_name, min_reads, sample_n_sites):
+def build_cmd(name, pod5_root, pod5_sub, gt_name, min_reads, sample_n_sites):
     out_path = f'{OUT_ROOT}/{name}/features.h5'
     parts = [
         PYTHON, FEATURIZE,
-        '--pod5', f'{POD5_ROOT}/{pod5_sub}',
+        '--pod5', f'{pod5_root}/{pod5_sub}',
         '--bam', f'{OLD_RESULTS}/{name}/reads_refined.bam',
         '--peaks', f'{OLD_RESULTS}/{name}/peaks_refined.tsv',
         '--output', out_path,
@@ -96,10 +108,10 @@ def main():
     logdir = Path(OUT_ROOT) / 'logs'
     logdir.mkdir(parents=True, exist_ok=True)
 
-    for name, pod5_sub, gt_name, min_reads, sample_n_sites, mem in DATASETS:
+    for name, pod5_root, pod5_sub, gt_name, min_reads, sample_n_sites, mem in DATASETS:
         if only and name not in only:
             continue
-        out_path, cmd = build_cmd(name, pod5_sub, gt_name, min_reads, sample_n_sites)
+        out_path, cmd = build_cmd(name, pod5_root, pod5_sub, gt_name, min_reads, sample_n_sites)
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         wrap = f"{CONDA_INIT} && " + ' '.join(cmd)
         sbatch = [

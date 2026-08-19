@@ -29,17 +29,54 @@ CHEMISTRY TYPING (per modified image)
            forward-T -> 5hmU (precedence), else m/h/a -> 5mC/5hmC/6mA
   HP WT -> centre reference base: A/T -> 6mA, C/G -> 4mC (both strands)
 
-Chemistries present: 5hmU, 5mC, 5hmC, 6mA, 4mC.
+Chemistries present in the core matched pool: 5hmU, 5mC, 5hmC, 6mA, 4mC.
+
+CURRICULUM DATA (EXTRA_ORGANISMS=1 / INCLUDE_HUMAN=1, BENCH:: members)
+7 single-sample WT/native benchmark organisms (Kulkarni et al. 2024) + hg001/
+hg002 -- no matched unmodified twin, so they never enter curriculum stage 1
+(paired anchors), but ARE unioned into every fold's stage-2 training by
+default (see fit()'s `extra` param). chem_array() never assigns these images a
+chemistry label (they sit at chem=''), which is a real trap: several BENCH::
+organisms carry the SAME chemistry as a core-pool target under a DIFFERENT
+name, and blindly including them leaks that "held-out" chemistry straight into
+training. Quantified once (2026-08-19): with both flags on, BENCH:: leaks
+131,660 6mA / 100,138 5mC / 4,807 4mC images into every fold regardless of
+which core chemistry is held out -- vs. core-pool censuses of only 40,452 /
+5,870 / 4,780 for those three (i.e. the leak outweighs the intended holdout,
+3x-17x over). 5hmC and 5hmU are never present in BENCH:: -- unaffected.
+FIX: BENCH_ORG_CHEMS records each organism's real (REBASE/motif-characterized)
+chemistry content; loco_<CHEM> strips any BENCH:: organism whose set contains
+the held-out CHEM out of `extra_idx` before training, so "held out" really
+means never-seen-anywhere, not just absent from the core pool. NOTE: this fix
+is applied for loco_<CHEM> only -- subset_<...> (below) evaluates one trained
+model against MULTIPLE held-out targets at once, so a single clean exclusion
+isn't well-defined there; treat subset_ chemistry-leak numbers for 6mA/5mC/4mC
+with that caveat.
 
 FOLDS (one SLURM job each)
-  loco_<CHEM>  leave-one-chemistry-out:
+  loco_<CHEM>  leave-one-chemistry-out (CHEM in 5hmU/4mC/6mA/5mC/5hmC):
      train = {positives typed != CHEM}  U  {85% of controls, position-grouped}
+              U  {BENCH:: curriculum data, minus organisms carrying CHEM}
      test  = {positives typed == CHEM}  U  {15% controls, from the organism(s)
               carrying CHEM AND whose centre ref base matches CHEM's target
               base(s)} -- a pure signal contrast (e.g. modified-T vs unmodified-T
               for 5hmU), not a trivial base-composition split.
      This is the zero-shot "modification-agnostic" test: the model is scored on a
-     chemistry it never saw, using causal negatives from the same sample.
+     chemistry it never saw ANYWHERE in training, using causal negatives from
+     the same sample. These 5 folds + mixed + the 3 logo_<group> folds are the
+     final, paper-reported models (see results19/).
+  logo_<group>  leave-one-organism-group-out (group in bacteria/plant/mammal,
+     see LOGO_GROUPS): holds out entire BENCH:: organism(s) -- never in stage-2
+     training, scored zero-shot as their own test set. logo_bacteria adds
+     BGCTRL:: (non-motif background negatives) as test-only negatives, since
+     the 6 bacterial BENCH:: datasets are 100% positive on their own.
+  subset_<c1>+<c2>[+c3]  training-diversity sweep (2-4 of the 5 CHEMS in
+     training; see parse_subset_fold): a single model trained on exactly this
+     chemistry subset is zero-shot-evaluated against every chemistry NOT in
+     it, so C(5,2)+C(5,3)+C(5,4)=25 unique subsets cover the full "AUROC vs
+     #training-chemistries" sweep -- the 5 size-4 subsets are exactly the
+     loco_<CHEM> folds above, reused rather than retrained. Exploratory (see
+     results18_chem_diversity/), NOT part of the leak fix -- see caveat above.
   mixed        position-grouped 85/15 split over the whole matched pool
                (in-distribution reference point).
 
@@ -48,8 +85,16 @@ run_pipeline.train_one_model with total loss BCE + SUPCON_WEIGHT*SupCon on the
 causal labels. All model/train/eval code is imported from the repo; this file
 only assembles the matched pool and defines the LOCO splits.
 
+FINAL RECIPE (results19, the paper models): RAWMOD_DATA_GEN=strand15
+EXTRA_ORGANISMS=1 INCLUDE_HUMAN=1 SUPCON_DIM=128 SUPCON_WEIGHT=1.0
+SUPCON_TEMP=0.20 CURRICULUM=1 CURRICULUM_EPOCHS=15 SAD_DIM=32 SAD_WEIGHT=1.0
+SAD_ETA=1.0 BCE_WEIGHT=1.0 -- see run_matched_loco.sh and the repo README for
+the full launch command.
+
 Usage:
-  python run_matched_loco.py --fold {mixed|loco_5hmU|loco_4mC|loco_6mA|loco_5mC|loco_5hmC} \
+  python run_matched_loco.py \
+      --fold {mixed|loco_5hmU|loco_4mC|loco_6mA|loco_5mC|loco_5hmC|
+              logo_bacteria|logo_plant|logo_mammal|subset_<c1>+<c2>[+c3]} \
       --out-dir <dir> [--epochs N]
 """
 import argparse

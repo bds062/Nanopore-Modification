@@ -1,0 +1,2 @@
+fold	test_set	held_out	micro_f1	mod_f1	unmod_f1	macro_f1	mod_prec	mod_rec	auprc	auroc	auroc_sad	threshold	n_pos	n_test
+mixed	held_out_test		0.975264	0.983737	0.948356	0.966047	0.981729	0.985754	0.998529	0.996288	0.986263	0.240401	39028	51423
