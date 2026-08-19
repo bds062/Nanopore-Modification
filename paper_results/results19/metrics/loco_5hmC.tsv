@@ -1,2 +1,0 @@
-fold	test_set	held_out	micro_f1	mod_f1	unmod_f1	macro_f1	mod_prec	mod_rec	auprc	auroc	auroc_sad	threshold	n_pos	n_test
-loco_5hmC	zeroshot_5hmC	5hmC	0.793478	0.552664	0.865749	0.709207	0.449144	0.718196	0.507964	0.837306	0.823637	0.402159	621	3496

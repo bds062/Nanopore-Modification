@@ -1,2 +1,0 @@
-fold	test_set	held_out	micro_f1	mod_f1	unmod_f1	macro_f1	mod_prec	mod_rec	auprc	auroc	auroc_sad	threshold	n_pos	n_test
-logo_bacteria	zeroshot_bacteria	bacteria	0.929218	0.963310	0.000000	0.481655	0.929218	1.000000	0.966266	0.705927	0.652777	0.003279	236301	254301
