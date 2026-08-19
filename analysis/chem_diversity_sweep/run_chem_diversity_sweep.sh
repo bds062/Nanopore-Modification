@@ -20,7 +20,8 @@
 # Usage (login node): bash run_chem_diversity_sweep.sh [--dry-run]
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRAIN_DIR="$(cd "${HERE}/../../scripts/train" && pwd)"
 
 CHEMS=(5hmU 4mC 6mA 5mC 5hmC)
 FOLDS=""
@@ -51,4 +52,4 @@ SAD_WEIGHT=1.0 \
 SAD_ETA=1.0 \
 BCE_WEIGHT=1.0 \
 TIME_LIMIT=12:00:00 \
-bash "${REPO_DIR}/run_matched_loco.sh" "$@"
+bash "${TRAIN_DIR}/run_matched_loco.sh" "$@"

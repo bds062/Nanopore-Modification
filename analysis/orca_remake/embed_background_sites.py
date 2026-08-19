@@ -24,8 +24,8 @@ import torch
 from torch.utils.data import DataLoader
 
 REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
-for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'experiments' / 'pipeline4',
-           REPO / 'experiments' / 'pipeline1', REPO / 'deepmod', REPO / 'experiments' / 'pipeline3'):
+for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
+           REPO / 'scripts' / 'train', REPO / 'rawmod', REPO / 'scripts' / 'test'):
     sys.path.insert(0, str(_p))
 
 from model import PileupDataset, make_loader_kwargs, _worker_init_fn  # noqa: E402

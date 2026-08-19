@@ -20,9 +20,9 @@ dependencies = [
 ]
 
 [project.scripts]
-rawmod-featurize = "deepmod.featurization:main"
-rawmod-train = "deepmod.model:main"
-rawmod-visualize = "deepmod.visualization:main"
+rawmod-featurize = "rawmod.featurization:main"
+rawmod-train = "rawmod.model:main"
+rawmod-visualize = "rawmod.visualization:main"
 
 [tool.setuptools.packages.find]
-include = ["deepmod*"]
+include = ["rawmod*"]

@@ -36,7 +36,7 @@ from sklearn.metrics import roc_auc_score
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-for p in (REPO / 'experiments' / 'pipeline1', REPO / 'deepmod'):
+for p in (REPO / 'scripts' / 'train', REPO / 'rawmod'):
     sys.path.insert(0, str(p))
 sys.path.insert(0, str(HERE))
 

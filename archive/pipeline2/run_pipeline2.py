@@ -75,8 +75,8 @@ import torch
 # the scratch ConvFormerV2 had no dann_lambda, so every job died at model
 # construction). Only data and trained checkpoints live on scratch.
 REPO = Path(__file__).resolve().parents[2]          # .../Nanopore-Modification
-PIPE1 = REPO / 'experiments' / 'pipeline1'
-DEEPMOD = REPO / 'deepmod'
+PIPE1 = REPO / 'scripts' / 'train'
+DEEPMOD = REPO / 'rawmod'
 sys.path.insert(0, str(PIPE1))
 sys.path.insert(0, str(DEEPMOD))
 

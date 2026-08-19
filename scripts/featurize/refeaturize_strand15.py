@@ -3,7 +3,7 @@
 Refeaturize all 13 dataset files used by run_matched_loco.py's matched pool
 (build_members()) with two changes vs the originals:
   --max-reads 30 -> 15
-  --strand both  -> +   (forward-strand reads only; see deepmod/featurization.py
+  --strand both  -> +   (forward-strand reads only; see rawmod/featurization.py
                          --strand, added because raw nanopore signal is strand-
                          specific -- pooling both strands in one pileup mixes two
                          physically different measurements. See memory:
@@ -49,7 +49,7 @@ RAWHASH2_LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/'
                         'extern/local_kmer_models/uncalled_r1041_model_only_means.txt')
 ONT_LEVEL_TABLE = '/fs/nexus-scratch/bds062/results/uncalled_r1041_model_only_means.txt'
 
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod/featurization.py'
+FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
 PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
 CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
              'conda activate /fs/nexus-scratch/bds062/envs/mod')
@@ -59,7 +59,7 @@ UMBC = '/fs/cbcb-lab/storm/shared/umbc-ont-data'
 BC_POD5 = f'{UMBC}/pod5_by_barcode/run1_jan31/single_end/high_quality'
 BC_BAM = f'{UMBC}/basecalled/run1_jan31/single_end/high_quality'
 
-# ── HP (H. pylori 26695): deepmod/featurization.py, pipeline.sh convention ────
+# ── HP (H. pylori 26695): rawmod/featurization.py, pipeline.sh convention ────
 # Original min-reads=25 was set against max-reads=30 (~83% fill). With
 # max-reads=15 (this revamp) and --max-images-per-base 1 unchanged, 25 is
 # structurally unreachable (15*1 < 25 -- featurization.py now validates this).

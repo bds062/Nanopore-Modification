@@ -40,7 +40,7 @@ import h5py
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / 'deepmod'))
+sys.path.insert(0, str(REPO / 'rawmod'))
 
 from sklearn.mixture import GaussianMixture           # noqa: E402
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score  # noqa: E402

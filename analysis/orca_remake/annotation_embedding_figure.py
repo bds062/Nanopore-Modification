@@ -53,7 +53,7 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
-sys.path.insert(0, str(REPO / 'experiments' / 'pipeline3'))
+sys.path.insert(0, str(REPO / 'scripts' / 'test'))
 from cluster_types import bic_sweep, evaluate, gmm_cluster  # noqa: E402
 
 EMBED_DIR = Path('/fs/cbcb-scratch/bds062/results/orca_remake/data/embeddings')

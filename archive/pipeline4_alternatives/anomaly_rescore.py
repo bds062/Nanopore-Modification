@@ -24,8 +24,8 @@ from sklearn.metrics import roc_auc_score
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-for p in (REPO / 'experiments' / 'pipeline1', REPO / 'experiments' / 'pipeline3',
-          REPO / 'deepmod'):
+for p in (REPO / 'scripts' / 'train', REPO / 'scripts' / 'test',
+          REPO / 'rawmod'):
     sys.path.insert(0, str(p))
 
 # load run_matched_loco as a module to reuse its pool-assembly helpers

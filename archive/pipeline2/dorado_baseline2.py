@@ -42,7 +42,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 P1 = HERE.parent / 'deepmod_full_pipeline1'
 sys.path.insert(0, str(P1))
-sys.path.insert(0, '/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod')
+sys.path.insert(0, '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod')
 
 import run_pipeline as R                     # noqa: E402
 import dorado_baseline as D                  # noqa: E402 — pileups, predict, OR-rule

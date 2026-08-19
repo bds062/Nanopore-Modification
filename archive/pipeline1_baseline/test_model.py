@@ -44,7 +44,7 @@ from sklearn.metrics import (
     f1_score, precision_score, confusion_matrix,
 )
 
-DEEPMOD = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod')
+DEEPMOD = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod')
 PIPE = Path(__file__).resolve().parent
 sys.path.insert(0, str(DEEPMOD))
 sys.path.insert(0, str(PIPE))

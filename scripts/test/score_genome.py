@@ -33,9 +33,9 @@ import torch
 # Resolve imports against THIS repo, not the scratch working copies. Only data and
 # trained checkpoints live on scratch; all code comes from the repo.
 REPO = Path(__file__).resolve().parents[2]          # .../Nanopore-Modification
-for _p in (REPO / 'experiments' / 'pipeline2',
-           REPO / 'experiments' / 'pipeline1',
-           REPO / 'deepmod'):
+for _p in (REPO / 'scripts' / 'train',
+           REPO / 'archive' / 'pipeline1_baseline',
+           REPO / 'rawmod'):
     sys.path.insert(0, str(_p))
 
 # Trained weights (data artefact, not code) — overridable for portability.

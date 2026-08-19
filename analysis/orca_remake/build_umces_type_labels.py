@@ -25,7 +25,7 @@ import h5py
 import numpy as np
 
 REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
-sys.path.insert(0, str(REPO / 'experiments' / 'pipeline1'))
+sys.path.insert(0, str(REPO / 'scripts' / 'train'))
 from mod_types import build_umces_mod_map, _decode  # noqa: E402
 
 UMCES_REF = '/fs/cbcb-lab/storm/shared/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'

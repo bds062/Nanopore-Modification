@@ -34,8 +34,8 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
-for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'experiments' / 'pipeline4',
-           REPO / 'experiments' / 'pipeline1', REPO / 'deepmod', REPO / 'experiments' / 'pipeline3'):
+for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
+           REPO / 'scripts' / 'train', REPO / 'rawmod', REPO / 'scripts' / 'test'):
     sys.path.insert(0, str(_p))
 
 import os

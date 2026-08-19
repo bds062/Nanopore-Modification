@@ -49,10 +49,10 @@ import torch
 
 REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
 for _p in (REPO / 'analysis' / 'orca_remake',
-           REPO / 'experiments' / 'pipeline4',
-           REPO / 'experiments' / 'pipeline3',
-           REPO / 'experiments' / 'pipeline1',
-           REPO / 'deepmod'):
+           REPO / 'scripts' / 'train',
+           REPO / 'scripts' / 'test',
+           REPO / 'scripts' / 'train',
+           REPO / 'rawmod'):
     sys.path.insert(0, str(_p))
 
 import run_matched_loco as ML                                     # noqa: E402

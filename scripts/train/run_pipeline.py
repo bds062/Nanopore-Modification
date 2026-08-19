@@ -41,8 +41,8 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score,
 )
 
-DEEPMOD = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod')
-sys.path.insert(0, str(DEEPMOD))
+RAWMOD_CORE = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod')
+sys.path.insert(0, str(RAWMOD_CORE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from model import (

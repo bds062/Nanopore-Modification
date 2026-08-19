@@ -43,14 +43,14 @@ import torch
 from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
-for _p in (REPO / 'experiments' / 'pipeline1', REPO / 'experiments' / 'pipeline3', REPO / 'deepmod'):
+for _p in (REPO / 'scripts' / 'train', REPO / 'scripts' / 'test', REPO / 'rawmod'):
     sys.path.insert(0, str(_p))
 
 import run_pipeline as R                        # noqa: E402
 from score_genome import load_model              # noqa: E402
 
 PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-FEATURIZE = str(REPO / 'deepmod' / 'featurization.py')
+FEATURIZE = str(REPO / 'rawmod' / 'featurization.py')
 DEFAULT_LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/'
                        'extern/local_kmer_models/uncalled_r1041_model_only_means.txt')
 

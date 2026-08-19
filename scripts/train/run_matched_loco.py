@@ -109,7 +109,7 @@ import torch
 # Resolve imports against THIS repo (never the scratch working copies): the model
 # and training code must be the committed versions. Only data lives on scratch.
 REPO = Path(__file__).resolve().parents[2]
-for _p in (REPO / 'experiments' / 'pipeline1', REPO / 'deepmod'):
+for _p in (REPO / 'scripts' / 'train', REPO / 'rawmod'):
     sys.path.insert(0, str(_p))
 
 import run_pipeline as R                          # noqa: E402

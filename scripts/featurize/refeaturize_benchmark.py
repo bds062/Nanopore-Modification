@@ -39,7 +39,7 @@ import subprocess
 from pathlib import Path
 
 PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod/featurization.py'
+FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
 CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
              'conda activate /fs/nexus-scratch/bds062/envs/mod')
 

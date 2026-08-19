@@ -53,7 +53,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 REPO = Path(__file__).resolve().parents[2]
-for _p in (REPO / 'experiments' / 'pipeline1', REPO / 'deepmod'):
+for _p in (REPO / 'scripts' / 'train', REPO / 'rawmod'):
     sys.path.insert(0, str(_p))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 

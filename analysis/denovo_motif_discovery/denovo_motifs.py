@@ -37,7 +37,7 @@ import numpy as np
 from scipy.stats import chi2, rankdata
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / 'pipeline'))
+sys.path.insert(0, str(REPO / 'scripts' / 'ground_truth'))
 
 MEME_BIN = os.environ.get('MEME_BIN', '/fs/cbcb-scratch/bds062/envs/meme/bin/meme')
 
