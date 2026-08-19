@@ -662,6 +662,13 @@ def main():
                              'Use this for biological datasets to avoid mislabeling '
                              'ambiguous/unobserved sites as negative. (default: all '
                              'eligible positions are emitted)')
+    parser.add_argument('--strand', choices=['both', '+', '-'], default='both',
+                        help="Restrict to reads aligned to this strand only ('+' = "
+                             "forward, '-' = reverse). Raw nanopore signal is strand-"
+                             "specific, so pooling both strands into one pileup mixes "
+                             'two physically different measurements; use this to build '
+                             'single-strand pileups instead. (default: both, current '
+                             'behavior)')
     args = parser.parse_args()
 
     if args.max_images_per_base is not None and args.max_images_per_base < 1:
@@ -821,6 +828,9 @@ def main():
             continue
 
         strand = -1 if bam_read.is_reverse else +1
+        if args.strand != 'both' and strand != (+1 if args.strand == '+' else -1):
+            n_skip += 1
+            continue
         mapq   = bam_read.mapping_quality
         ref_name = bam_read.reference_name
 

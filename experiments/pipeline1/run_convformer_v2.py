@@ -159,7 +159,7 @@ class ConvFormerV2(nn.Module):
     def __init__(self, in_ch=IN_CH, h=H, w=W, d_model=D_MODEL, nhead=4,
                  layers=2, dim_ff=192, dropout=0.4,
                  dann_lambda=0.0, dann_flank=4, window_positions=21,
-                 supcon_dim=0, sad_dim=0):
+                 supcon_dim=0, sad_dim=0, org_adv_classes=0, org_adv_lambda=1.0):
         super().__init__()
         self.read_encoder = ReadConvEncoderV2(in_ch, d_model)
         self.pos = nn.Parameter(torch.zeros(1, h, d_model))
@@ -203,6 +203,20 @@ class ConvFormerV2(nn.Module):
                 nn.Linear(d_model, 128), nn.GELU(), nn.Dropout(dropout),
                 nn.Linear(128, len(self.flank_cols) * 4))
 
+        # --- organism/dataset adversary (results13) ---
+        # Gradient-reversed K-way organism classifier (ONT/SPO1/HP), same
+        # grad_reverse primitive as the sequence-context adversary above but a
+        # DIFFERENT target. Meant to erase organism substructure WITHIN the two
+        # SupCon-formed presence balls, not replace SupCon's attractive pull --
+        # see memory: strand-split-partial-fix (gradient reversal alone supplies
+        # no pull, only erasure; SupCon supplies the pull). The loss itself
+        # (needs external organism labels) is computed in the training loop,
+        # same pattern as 'proj'/SupCon -- forward() only returns the logits.
+        self.org_adv_classes = int(org_adv_classes)
+        self.org_adv_lambda = float(org_adv_lambda)
+        self.org_adv_head = (nn.Linear(d_model, self.org_adv_classes)
+                             if self.org_adv_classes > 0 else None)
+
     def _flank_targets(self, x):
         """Per-flank-position reference base index (0-3) + validity, from row 0."""
         B = x.shape[0]
@@ -234,7 +248,8 @@ class ConvFormerV2(nn.Module):
             self._sad = self.sad_head(rep)
 
         if self.training and (self.dann_lambda > 0 or self.proj is not None
-                              or self.sad_head is not None):
+                              or self.sad_head is not None
+                              or self.org_adv_head is not None):
             aux = {}
             if self.dann_lambda > 0:
                 tgt, valid = self._flank_targets(x)              # (B,F)
@@ -250,8 +265,83 @@ class ConvFormerV2(nn.Module):
                 aux['proj'] = self.proj(rep)                     # (B, supcon_dim)
             if self.sad_head is not None:
                 aux['sad'] = self._sad                           # (B, sad_dim)
+            if self.org_adv_head is not None:
+                # organism labels live outside x; loss computed in training loop
+                aux['org_adv_logits'] = self.org_adv_head(
+                    grad_reverse(rep, self.org_adv_lambda))       # (B, org_adv_classes)
             return logit, aux
         return logit
+
+
+class ConvFormerV2DANN(nn.Module):
+    """
+    Two-head DANN variant (results7/results8): NO BCE head, NO SupCon, NO Deep
+    SAD. Same backbone as ConvFormerV2 (read_encoder -> Transformer -> masked
+    mean-pool -> LayerNorm = 96-d penultimate `rep`), but exactly two heads
+    hang off `rep`, both classification-via-NLLLoss (raw logits returned; the
+    training loop applies log_softmax + nll_loss, mirroring how ConvFormerV2's
+    single BCE head returns a raw logit for BCEWithLogitsLoss):
+
+      presence_head (2-way): predicts modification PRESENCE (mod vs unmod) --
+          this IS the detector. Normal (non-reversed) gradient: the backbone
+          is optimized to make `rep` MORE informative for this.
+
+      adv_head (n_adv_classes-way): predicts either modification TYPE
+          (results7, 5-way over the modified chemistries; unmodified images are
+          excluded from this loss by the training loop, not by the model) or
+          source DATASET/organism (results8, 3-way ONT/SPO1/HP; every image has
+          one). Fed through the SAME gradient-reversal primitive already used
+          by ConvFormerV2's sequence-context adversary (`grad_reverse` above):
+          adv_head itself is trained normally to classify as well as it can,
+          but the gradient reaching `rep` (and thus the shared backbone) is
+          NEGATED and scaled by adv_lambda, so the backbone is adversarially
+          pushed to make `rep` UNINFORMATIVE about type/dataset while it still
+          must stay informative about presence. Purpose: test whether this
+          directly attacks the organism-dominated embedding clustering found
+          in `embedding-not-chemistry-space` / `results6-bce-supcon-tradeoff`.
+
+    forward() returns (presence_logits, adv_logits) whenever training=True,
+    else presence_logits alone (adv_head is training-only, exactly like the
+    dann adversary in ConvFormerV2). The penultimate `rep` is retrievable at
+    eval via a forward hook on presence_head (its INPUT), same technique
+    score_genome.py already uses for ConvFormerV2.
+    """
+    def __init__(self, in_ch=IN_CH, h=H, w=W, d_model=D_MODEL, nhead=4,
+                 layers=2, dim_ff=192, dropout=0.4,
+                 n_adv_classes=5, adv_lambda=1.0):
+        super().__init__()
+        self.read_encoder = ReadConvEncoderV2(in_ch, d_model)
+        self.pos = nn.Parameter(torch.zeros(1, h, d_model))
+        enc = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_ff, dropout,
+            activation='gelu', batch_first=True, norm_first=True)
+        self.encoder = nn.TransformerEncoder(enc, layers)
+        self.norm = nn.LayerNorm(d_model)
+        nn.init.trunc_normal_(self.pos, std=0.02)
+
+        self.presence_head = nn.Sequential(nn.Dropout(dropout), nn.Linear(d_model, 2))
+        self.n_adv_classes = int(n_adv_classes)
+        self.adv_lambda = float(adv_lambda)
+        self.adv_head = nn.Sequential(nn.Dropout(dropout), nn.Linear(d_model, self.n_adv_classes))
+
+    def forward(self, x):                        # (B, C, H, W)
+        B, C, Hh, Ww = x.shape
+        pad = x[:, 0].abs().sum(dim=2) < 1e-6     # (B, H); reference row never masked
+        pad[:, 0] = False
+
+        reads = x.permute(0, 2, 1, 3).reshape(B * Hh, C, Ww)
+        emb = self.read_encoder(reads).view(B, Hh, -1) + self.pos
+
+        enc = self.encoder(emb, src_key_padding_mask=pad)
+        keep = (~pad).unsqueeze(-1).float()
+        pooled = (enc * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1.0)
+        rep = self.norm(pooled)
+
+        presence_logits = self.presence_head(rep)
+        if self.training:
+            adv_logits = self.adv_head(grad_reverse(rep, self.adv_lambda))
+            return presence_logits, adv_logits
+        return presence_logits
 
 
 def main():

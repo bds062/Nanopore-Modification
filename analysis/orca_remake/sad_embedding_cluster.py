@@ -189,9 +189,18 @@ def scatter(ax, xy, labels, order, cmap, title, ari_box):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--ckpt', default=str(CKPT),
+                    help='checkpoint to embed (default: results5 mixed SAD)')
+    ap.add_argument('--out-dir', default=str(OUT),
+                    help='output dir (default: results4/embedding_clustering)')
+    a = ap.parse_args()
+    ckpt, out = Path(a.ckpt), Path(a.out_dir)
+
     rng = np.random.default_rng(SEED)
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / 'figures').mkdir(exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'figures').mkdir(exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # ---- assemble the matched pool + per-site chemistry typing (reuse the driver) ----
@@ -210,10 +219,10 @@ def main():
           f"{dict(Counter(types))}\n  organisms {dict(Counter(orgs))}", flush=True)
 
     # ---- embed everything through the ONE best (mixed SAD) checkpoint ----
-    print(f"\nEmbedding via {CKPT}", flush=True)
-    rep, sad = extract_embeddings(pool, idx, device)
+    print(f"\nEmbedding via {ckpt}", flush=True)
+    rep, sad = extract_embeddings(pool, idx, device, ckpt=ckpt)
     print(f"  penultimate {rep.shape}   SAD-space {sad.shape}", flush=True)
-    np.savez_compressed(OUT / 'embeddings.npz', rep=rep.astype(np.float16),
+    np.savez_compressed(out / 'embeddings.npz', rep=rep.astype(np.float16),
                         sad=sad.astype(np.float16), types=types, orgs=orgs,
                         idx=idx.astype(np.int64))
 
@@ -223,7 +232,7 @@ def main():
         "(ORCA fingerprinting analog; the checkpoint is trained BINARY mod/unmod\n",
         " + Deep SAD, NEVER given a type label. Type labels are used ONLY to score\n",
         " the unsupervised GMM clustering, never to fit it or the model.)\n",
-        f"\ncheckpoint: {CKPT}\n",
+        f"\ncheckpoint: {ckpt}\n",
         f"pooled: {len(idx):,} images | types {dict(Counter(types))}\n",
         f"organisms {dict(Counter(orgs))}\n",
         "\nCAVEAT: in-sample embedding space (model was trained on these reads as\n",
@@ -232,10 +241,10 @@ def main():
     ]
     rep_all, rep_sub = cluster_space(rep, types, orgs, "penultimate 96-d embedding", report)
     sad_all, sad_sub = cluster_space(sad, types, orgs, "Deep-SAD 32-d space", report)
-    (OUT / 'clustering_report.txt').write_text(''.join(report))
+    (out / 'clustering_report.txt').write_text(''.join(report))
     print('\n' + ''.join(report[10:]))
 
-    with open(OUT / 'clustering_metrics.tsv', 'w') as fh:
+    with open(out / 'clustering_metrics.tsv', 'w') as fh:
         fh.write("space\tsubset\tari_type\tari_organism\tnmi_type\tnmi_organism\n")
         for space, res_all, res_sub in [("penultimate", rep_all, rep_sub),
                                         ("sad", sad_all, sad_sub)]:
@@ -275,11 +284,11 @@ def main():
         "all 5 chemistries, in-sample proof of concept)", fontsize=12, y=0.995)
     fig.subplots_adjust(top=0.86, bottom=0.03, left=0.03, right=0.97,
                         hspace=0.25, wspace=0.15)
-    fig.savefig(OUT / 'figures' / 'fig_embedding_cluster.png', dpi=150)
+    fig.savefig(out / 'figures' / 'fig_embedding_cluster.png', dpi=150)
     plt.close(fig)
-    print(f"\nwrote {OUT/'figures'/'fig_embedding_cluster.png'}")
-    print(f"wrote {OUT/'clustering_report.txt'}")
-    print(f"wrote {OUT/'clustering_metrics.tsv'}")
+    print(f"\nwrote {out/'figures'/'fig_embedding_cluster.png'}")
+    print(f"wrote {out/'clustering_report.txt'}")
+    print(f"wrote {out/'clustering_metrics.tsv'}")
 
 
 if __name__ == '__main__':

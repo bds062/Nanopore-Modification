@@ -103,19 +103,147 @@ CHEM_ORGS = {
 # train_one_model handles the residual imbalance. Positives are never capped.
 NEG_CAP = {'ONT::': 30000, 'SPO1::': 40000, 'HP::': 40000}
 
+# Real (biological, REBASE/motif-characterized) chemistry content of each
+# BENCH:: organism -- NOT the same as chem_array()'s per-image typing, which
+# only labels ONT/SPO1/HP images and leaves every BENCH:: image at chem=''.
+# That blind spot let BENCH:: positives leak the "held-out" chemistry straight
+# into loco_<CHEM> training via fit()'s always-included bench_idx: e.g.
+# loco_6mA nominally excludes all 6mA from the core pool, but 6 of 7 BENCH::
+# organisms are Dam-like 6mA and were still unioned into stage-2 training
+# regardless. Quantified once (see chat/insights, 2026-08-19): with
+# EXTRA_ORGANISMS=1+INCLUDE_HUMAN=1, BENCH:: leaks 131,660 6mA / 100,138 5mC /
+# 4,807 4mC images into every fold's training -- vs. core-pool censuses of
+# only 40,452 / 5,870 / 4,780 for those chemistries respectively (i.e. the
+# leaked signal outweighs what was supposedly held out, 3x-17x over). 5hmC and
+# 5hmU are never present in BENCH:: -- those two folds were never affected.
+# Used by loco_<CHEM> to strip chemistry-matching BENCH:: organisms out of
+# extra_idx, mirroring how logo_<group> already excludes the held-out group.
+BENCH_ORG_CHEMS = {
+    'Anabaena_WT_5kHz':    {'6mA'},
+    'Ecoli_DM_5kHz':       {'6mA'},
+    'Ecoli_DM_MSssI_5kHz': {'6mA', '5mC'},
+    'Ecoli_WT_5kHz':       {'6mA', '5mC'},
+    'Tdenticola_WT_5kHz':  {'6mA'},
+    'HPJ99_WT_5kHz':       {'6mA', '4mC'},
+    'arabidopsis':         {'5mC'},
+    'hg001':               {'5mC'},
+    'hg002':               {'5mC'},
+}
+
 HP_WT  = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/features.h5'
 HP_WGA = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/features.h5'
+
+# Strand-split, 15-read revamp (rawmod_full_pipeline4/refeaturize_strand15.py):
+# forward-strand-only pileups, height 16 (15 reads + ref row) instead of 31,
+# also unbiased site/base sampling. See memory: organism-identifiability-root
+# -cause (strand-pooling was found to be a major dataset/organism batch-effect
+# fingerprint) and results7-8-dann-backfire. Toggle with RAWMOD_DATA_GEN=strand15.
+_P4 = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features'
+HP_WT_V2  = f'{_P4}/HP26695_WT_5kHz/features.h5'
+HP_WGA_V2 = f'{_P4}/HP26695_WGA_5kHz/features.h5'
+ONT_FILES_V2 = {
+    '5mC':     f'{_P4}/ONT/5mC.h5',
+    '5hmC':    f'{_P4}/ONT/5hmC.h5',
+    '6mA':     f'{_P4}/ONT/6mA.h5',
+    'control': f'{_P4}/ONT/control.h5',
+}
+UMCES_FILES_V2 = {
+    'bc06': f'{_P4}/deepmod_ont+umces/barcode06.h5',
+    'bc07': f'{_P4}/deepmod_ont+umces/barcode07.h5',
+    'bc02': f'{_P4}/deepmod_umces/train/barcode02.h5',
+    'bc03': f'{_P4}/deepmod_umces/train/barcode03.h5',
+    'bc04': f'{_P4}/deepmod_umces/train/barcode04.h5',
+    'bc05': f'{_P4}/deepmod_umces/train/barcode05.h5',
+    'bc01': f'{_P4}/deepmod_umces/test/barcode01_test.h5',
+}
+USE_STRAND15 = os.environ.get('RAWMOD_DATA_GEN', '') == 'strand15'
+HEIGHT = 16 if USE_STRAND15 else 31   # 1 ref row + (15 or 30) reads
+
+# Extra-organism curriculum (EXTRA_ORGANISMS=1): 7 ONT-basemod-benchmark
+# (Kulkarni et al. 2024) datasets genuinely novel relative to the matched pool
+# above (HP26695 WT/WGA is EXCLUDED here -- it's already the source of the
+# HP:: data above, would be pure duplication). Single-strand featurization
+# (--strand + --min-mapq 0), same height=16 convention as strand15 -- requires
+# USE_STRAND15. These are single-sample WT/native strains (no matched
+# unmodified twin at the same coordinate the way ONT/SPO1/HP are designed), so
+# they contribute ZERO curriculum stage-1 anchors by construction and are only
+# added to stage-2 (full-fold) training -- see `fit()`'s `bench_idx` union.
+USE_EXTRA_ORGS = os.environ.get('EXTRA_ORGANISMS', '0') == '1'
+_BENCH_ROOT = f'{_P4}/benchmark'
+BENCH_FILES = {
+    'Anabaena_WT_5kHz':    f'{_BENCH_ROOT}/Anabaena_WT_5kHz/features.h5',
+    'Ecoli_DM_5kHz':       f'{_BENCH_ROOT}/Ecoli_DM_5kHz/features.h5',
+    'Ecoli_DM_MSssI_5kHz': f'{_BENCH_ROOT}/Ecoli_DM_MSssI_5kHz/features.h5',
+    'Ecoli_WT_5kHz':       f'{_BENCH_ROOT}/Ecoli_WT_5kHz/features.h5',
+    'Tdenticola_WT_5kHz':  f'{_BENCH_ROOT}/Tdenticola_WT_5kHz/features.h5',
+    'HPJ99_WT_5kHz':       f'{_BENCH_ROOT}/HPJ99_WT_5kHz/features.h5',
+    'arabidopsis':         f'{_BENCH_ROOT}/arabidopsis/features.h5',
+}
+
+# Human data (hg001/hg002) is gated by its OWN flag, separate from
+# EXTRA_ORGANISMS -- so EXTRA_ORGANISMS=1 keeps its documented meaning (the 7
+# bacterial/plant benchmark organisms) for results14/results15/temp-sweep
+# reproducibility, and human data can be toggled independently. Very
+# different scale from the bacterial sets: hg001 has 2,858 images (79
+# pos/2,779 neg), hg002 only 98 (71 pos/27 neg) -- both real bisulfite/EM-seq
+# GT (not motif), unlike 6 of the 7 bacterial sets.
+USE_HUMAN = os.environ.get('INCLUDE_HUMAN', '0') == '1'
+HUMAN_FILES = {
+    'hg001': f'{_BENCH_ROOT}/hg001/features.h5',
+    'hg002': f'{_BENCH_ROOT}/hg002/features.h5',
+}
+
+# LOGO (leave-one-group-out, organism/dataset-level holdout): groups of BENCH::
+# organisms held out ENTIRELY from training (never in stage-2, unlike the
+# always-included bench_idx used by loco_<CHEM>/mixed) and scored zero-shot as
+# their own test set. See logo_<group> branch in main().
+LOGO_GROUPS = {
+    'bacteria': ['Anabaena_WT_5kHz', 'Ecoli_DM_5kHz', 'Ecoli_DM_MSssI_5kHz',
+                'Ecoli_WT_5kHz', 'Tdenticola_WT_5kHz', 'HPJ99_WT_5kHz'],
+    'plant':    ['arabidopsis'],
+    'mammal':   ['hg001', 'hg002'],
+}
+
+# The 6 bacterial BENCH:: datasets are 100% positive (no negatives -- see
+# insights.md), so logo_bacteria's test set would have an undefined AUROC
+# (single class) without help. BGCTRL:: members are non-motif background
+# positions (pipeline/generate_background_sites.py + featurize_background.py)
+# -- genuine unmodified-context negatives, same base chemistry, just outside
+# the recognition motif. Used ONLY as extra test negatives for logo_bacteria;
+# never added to any training set (see is_bgctrl handling in main()).
+_BGCTRL_ROOT = f'{_P4}/benchmark'
+BGCTRL_FILES = {
+    'Anabaena_WT_5kHz':    f'{_BGCTRL_ROOT}/Anabaena_WT_5kHz_background/features.h5',
+    'Ecoli_DM_5kHz':       f'{_BGCTRL_ROOT}/Ecoli_DM_5kHz_background/features.h5',
+    'Ecoli_DM_MSssI_5kHz': f'{_BGCTRL_ROOT}/Ecoli_DM_MSssI_5kHz_background/features.h5',
+    'Ecoli_WT_5kHz':       f'{_BGCTRL_ROOT}/Ecoli_WT_5kHz_background/features.h5',
+    'Tdenticola_WT_5kHz':  f'{_BGCTRL_ROOT}/Tdenticola_WT_5kHz_background/features.h5',
+    'HPJ99_WT_5kHz':       f'{_BGCTRL_ROOT}/HPJ99_WT_5kHz_background/features.h5',
+}
 
 
 def build_members():
     """name -> h5 path for the matched-only pool (prefixes encode the organism)."""
+    ont_files = ONT_FILES_V2 if USE_STRAND15 else R.ONT_FILES
+    umces_files = UMCES_FILES_V2 if USE_STRAND15 else R.UMCES_FILES
     m = {}
     for mod in R.ONT_ORDER:                 # 5mC,5hmC,6mA,control
-        m[f'ONT::{mod}'] = R.ONT_FILES[mod]
+        m[f'ONT::{mod}'] = ont_files[mod]
     for bc in R.UMCES_ORDER:                # bc06,bc07 (pos) + bc01-05 (neg)
-        m[f'SPO1::{bc}'] = R.UMCES_FILES[bc]
-    m['HP::WT'] = HP_WT
-    m['HP::WGA'] = HP_WGA
+        m[f'SPO1::{bc}'] = umces_files[bc]
+    m['HP::WT'] = HP_WT_V2 if USE_STRAND15 else HP_WT
+    m['HP::WGA'] = HP_WGA_V2 if USE_STRAND15 else HP_WGA
+    if USE_EXTRA_ORGS:
+        assert USE_STRAND15, "EXTRA_ORGANISMS=1 requires RAWMOD_DATA_GEN=strand15 (height must match)"
+        for name, path in BENCH_FILES.items():
+            m[f'BENCH::{name}'] = path
+    if USE_HUMAN:
+        assert USE_STRAND15, "INCLUDE_HUMAN=1 requires RAWMOD_DATA_GEN=strand15 (height must match)"
+        for name, path in HUMAN_FILES.items():
+            m[f'BENCH::{name}'] = path
+    if USE_EXTRA_ORGS:
+        for name, path in BGCTRL_FILES.items():
+            m[f'BGCTRL::{name}'] = path
     return m
 
 
@@ -190,6 +318,23 @@ def subsample_negatives(group, seed=0):
     return np.sort(np.concatenate(keep))
 
 
+def parse_subset_fold(fold):
+    """'subset_<chem>+<chem>[+...]' -> sorted list of 2-4 distinct CHEMS, or None
+    if `fold` isn't a valid subset fold name. Powers the training-diversity sweep:
+    train on exactly this set of chemistries (+ the always-included BENCH::/human
+    curriculum data), then zero-shot-evaluate on every chemistry NOT in the set --
+    one trained model answers the sweep for all of its held-out chemistries at
+    once, so the 2-4 sweep only needs C(5,2)+C(5,3)+C(5,4) = 25 unique trainings
+    (5 of which are exactly the existing loco_<CHEM> models, size-4 subsets)
+    rather than retraining per (held-out chem, other-chem-subset) pair."""
+    if not fold.startswith('subset_'):
+        return None
+    chems = fold[len('subset_'):].split('+')
+    if not (2 <= len(chems) <= 4) or len(set(chems)) != len(chems) or not all(c in CHEMS for c in chems):
+        return None
+    return sorted(chems)
+
+
 def mixed_split(pool, is_pos, neg_mask, hp):
     """Deterministic 85/15 position-grouped split of the whole matched pool (all 5
     chemistries + capped controls) -- the 'mixed' in-distribution fold. Factored out
@@ -231,9 +376,11 @@ def main():
     ap.add_argument('--epochs', type=int, default=None)
     a = ap.parse_args()
 
-    valid = ['mixed', 'all'] + [f'loco_{c}' for c in CHEMS]
-    if a.fold not in valid:
-        raise SystemExit(f"--fold must be one of {valid}, got {a.fold!r}")
+    valid = ['mixed', 'all'] + [f'loco_{c}' for c in CHEMS] + [f'logo_{g}' for g in LOGO_GROUPS]
+    subset_chems = parse_subset_fold(a.fold)
+    if a.fold not in valid and subset_chems is None:
+        raise SystemExit(f"--fold must be one of {valid}, or subset_<chem>+<chem>[+...] "
+                         f"(2-4 distinct chems from {CHEMS}), got {a.fold!r}")
 
     hp = R.HP()
     if a.epochs:
@@ -256,6 +403,32 @@ def main():
     is_pos = pool.labels > 0
     kept_neg = subsample_negatives(pool, seed=hp.seed)
     neg_mask = np.zeros(pool.N, dtype=bool); neg_mask[kept_neg] = True
+
+    # Extra-organism curriculum data (BENCH:: prefixed members): stage-2-only,
+    # every fold, never in any test set. See build_members()/USE_EXTRA_ORGS.
+    is_bench = np.array([pool.names[int(pool.file_of[i])].startswith('BENCH::')
+                         for i in range(pool.N)])
+    bench_idx = np.nonzero(is_bench)[0].astype(np.int64)
+    if len(bench_idx):
+        n_bench_sets = sum(1 for nm in names if nm.startswith('BENCH::'))
+        print(f"  extra organisms (BENCH::, stage-2 training only): "
+              f"{len(bench_idx):,} images across {n_bench_sets} datasets "
+              f"(pos={int(is_pos[bench_idx].sum()):,} "
+              f"neg={int((~is_pos[bench_idx]).sum()):,})", flush=True)
+
+    # Per-image BENCH:: organism name (for logo_<group> filtering), '' elsewhere.
+    bench_org_of = np.array([
+        pool.names[int(pool.file_of[i])].split('::')[1] if is_bench[i] else ''
+        for i in range(pool.N)])
+
+    # BGCTRL:: background-control images (non-motif negatives for the 6
+    # bacterial datasets) -- ONLY used as extra test negatives for
+    # logo_bacteria, NEVER for training. See BGCTRL_FILES docstring.
+    is_bgctrl = np.array([pool.names[int(pool.file_of[i])].startswith('BGCTRL::')
+                          for i in range(pool.N)])
+    if is_bgctrl.any():
+        print(f"  background-control (BGCTRL::, logo_bacteria test-only): "
+              f"{int(is_bgctrl.sum()):,} images, all label=0", flush=True)
 
     # census
     from collections import Counter
@@ -292,7 +465,7 @@ def main():
         print(f"  [DeepSAD] sad_dim={sad_dim} weight={os.environ.get('SAD_WEIGHT','1.0')} "
               f"eta={os.environ.get('SAD_ETA','1.0')}", flush=True)
     model_factory = lambda: ConvFormerV2(dropout=hp.dropout, supcon_dim=supcon_dim,
-                                         sad_dim=sad_dim)
+                                         sad_dim=sad_dim, h=HEIGHT)
     rows = []
 
     def sad_auroc(model, idx):
@@ -324,8 +497,18 @@ def main():
     curriculum = os.environ.get('CURRICULUM', '0') == '1'
     cur_epochs = int(os.environ.get('CURRICULUM_EPOCHS', '15'))
 
-    def fit(train_idx, fold_dir, runtag):
+    def fit(train_idx, fold_dir, runtag, extra_idx=None):
         mdir = out / 'models' / fold_dir
+        # Stage-2 training set = this fold's train_idx UNION the extra-organism
+        # (BENCH::) pool, if any. Stage-1 (anchors, below) deliberately uses the
+        # UNEXPANDED train_idx: BENCH:: organisms have no matched unmodified twin
+        # at the same coordinate (single WT/native samples, not a synthetic-pair
+        # design), so they'd contribute zero anchors anyway -- this just makes
+        # that explicit rather than relying on coordinate non-overlap.
+        # extra_idx overrides the default (all bench_idx) -- used by logo_<group>
+        # to union in only the NON-held-out extra-organism groups.
+        extra = bench_idx if extra_idx is None else extra_idx
+        stage2_idx = np.sort(np.concatenate([train_idx, extra])) if len(extra) else train_idx
         if curriculum:
             anc = anchor_idx_within(pool, train_idx, is_pos)
             npos = int(is_pos[anc].sum()) if len(anc) else 0
@@ -339,11 +522,11 @@ def main():
                 del m1
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
-                return R.train_one_model(pool, train_idx, hp, device, mdir, runtag,
+                return R.train_one_model(pool, stage2_idx, hp, device, mdir, runtag,
                                          model_factory=model_factory, init_state=state)
             print("  [curriculum] too few paired anchors; single-stage fallback",
                   flush=True)
-        return R.train_one_model(pool, train_idx, hp, device, mdir, runtag,
+        return R.train_one_model(pool, stage2_idx, hp, device, mdir, runtag,
                                  model_factory=model_factory)
 
     def record(model, test_name, idx, held=''):
@@ -379,7 +562,7 @@ def main():
         model = fit(train_idx, a.fold, 'mixed')
         record(model, 'held_out_test', test_idx)
 
-    else:  # loco_<CHEM>
+    elif a.fold.startswith('loco_'):
         chem_x = a.fold[len('loco_'):]
         # controls: position-grouped 85/15 over the capped control pool
         ctrl_idx = np.nonzero(neg_mask)[0]
@@ -396,13 +579,85 @@ def main():
         train_idx = np.sort(np.concatenate([pos_other, tr_ctrl]))
         test_idx = np.sort(np.concatenate([pos_x, te_ctrl]))
         R.assert_disjoint(train_idx, test_idx, pool, a.fold)
+
+        # BENCH:: leak fix (see BENCH_ORG_CHEMS): strip out any BENCH:: organism
+        # that biologically carries chem_x before unioning the curriculum data
+        # into stage-2 training, so a "held-out" chemistry is actually never
+        # seen anywhere in training, not just absent from the core pool.
+        leaky_orgs = {o for o, cs in BENCH_ORG_CHEMS.items() if chem_x in cs}
+        clean_extra = np.nonzero(is_bench & ~np.isin(bench_org_of, list(leaky_orgs)))[0].astype(np.int64)
+        n_excluded = int(bench_idx.size - clean_extra.size)
         print(f"  train={len(train_idx):,} (pos_other={len(pos_other):,} "
               f"neg={len(tr_ctrl):,})  test={len(test_idx):,} "
               f"(pos_{chem_x}={len(pos_x):,} neg={len(te_ctrl):,})", flush=True)
+        if leaky_orgs:
+            print(f"  BENCH:: leak fix: excluding {sorted(leaky_orgs)} "
+                  f"({n_excluded:,} images that biologically carry {chem_x}) "
+                  f"from stage-2 curriculum -- clean_extra={len(clean_extra):,} "
+                  f"(of {len(bench_idx):,})", flush=True)
         if len(pos_x) == 0 or len(te_ctrl) == 0:
             raise SystemExit(f"empty test for {a.fold}: pos={len(pos_x)} neg={len(te_ctrl)}")
-        model = fit(train_idx, a.fold, 'loco')
+        model = fit(train_idx, a.fold, 'loco', extra_idx=clean_extra)
         record(model, f'zeroshot_{chem_x}', test_idx, held=chem_x)
+
+    elif a.fold.startswith('subset_'):
+        include_chems = subset_chems  # validated at top of main()
+        held_chems = [c for c in CHEMS if c not in include_chems]
+        print(f"  subset training chemistries: {include_chems}  "
+              f"(zero-shot held out: {held_chems})", flush=True)
+
+        ctrl_idx = np.nonzero(neg_mask)[0]
+        tr_ctrl, te_ctrl_all = pos_hash_split(pool, ctrl_idx, test_frac=0.15, seed=hp.seed)
+        pos_incl = np.nonzero(is_pos & np.isin(chem, include_chems))[0].astype(np.int64)
+        train_idx = np.sort(np.concatenate([pos_incl, tr_ctrl]))
+        print(f"  train={len(train_idx):,} (pos_incl={len(pos_incl):,} neg={len(tr_ctrl):,})",
+              flush=True)
+        model = fit(train_idx, a.fold, 'subset')
+
+        for chem_x in held_chems:
+            bases = CHEM_BASES[chem_x]; orgs = CHEM_ORGS[chem_x]
+            te_ctrl = np.array([i for i in te_ctrl_all
+                                if org_of(pool.names[int(pool.file_of[i])]) in orgs
+                                and refbase[i] in bases], dtype=np.int64)
+            pos_x = np.nonzero(is_pos & (chem == chem_x))[0].astype(np.int64)
+            test_idx = np.sort(np.concatenate([pos_x, te_ctrl]))
+            if len(pos_x) == 0 or len(te_ctrl) == 0:
+                print(f"  WARNING: empty test for held-out {chem_x}: "
+                      f"pos={len(pos_x)} neg={len(te_ctrl)} -- skipping", flush=True)
+                continue
+            R.assert_disjoint(train_idx, test_idx, pool, f'{a.fold}:{chem_x}')
+            record(model, f'zeroshot_{chem_x}', test_idx, held=chem_x)
+
+    elif a.fold.startswith('logo_'):  # leave-one-organism-group-out
+        group_x = a.fold[len('logo_'):]
+        held_orgs = LOGO_GROUPS[group_x]
+        held_mask = is_bench & np.isin(bench_org_of, held_orgs)
+        test_idx = np.nonzero(held_mask)[0].astype(np.int64)
+        if group_x == 'bacteria':
+            # 100% positive without help (see BGCTRL_FILES docstring) -- add the
+            # non-motif background negatives, test-only, never trained on.
+            bg_idx = np.nonzero(is_bgctrl)[0].astype(np.int64)
+            test_idx = np.sort(np.concatenate([test_idx, bg_idx]))
+            print(f"  logo_bacteria: +{len(bg_idx):,} BGCTRL:: background negatives "
+                  f"added to test only", flush=True)
+        extra_idx = np.nonzero(is_bench & ~held_mask)[0].astype(np.int64)
+        core_idx = np.nonzero((is_pos | neg_mask) & ~is_bench & ~is_bgctrl)[0].astype(np.int64)
+        R.assert_disjoint(core_idx, test_idx, pool, a.fold)
+        R.assert_disjoint(extra_idx, test_idx, pool, a.fold)
+        print(f"  train core={len(core_idx):,}  extra(other groups)={len(extra_idx):,}  "
+              f"test({group_x})={len(test_idx):,} (pos={int(is_pos[test_idx].sum()):,} "
+              f"neg={int((~is_pos[test_idx]).sum()):,})", flush=True)
+        if len(test_idx) == 0:
+            raise SystemExit(f"empty test for {a.fold}: no BENCH:: images for group {group_x}")
+        if int(is_pos[test_idx].sum()) == 0 or int((~is_pos[test_idx]).sum()) == 0:
+            print(f"  WARNING: {a.fold} test set is single-class "
+                  f"(pos={int(is_pos[test_idx].sum())} neg={int((~is_pos[test_idx]).sum())}) "
+                  f"-- AUROC will be NaN.", flush=True)
+        model = fit(core_idx, a.fold, 'logo', extra_idx=extra_idx)
+        record(model, f'zeroshot_{group_x}', test_idx, held=group_x)
+
+    else:
+        raise SystemExit(f"unhandled fold {a.fold!r}")  # unreachable: validated above
 
     cols = ['fold', 'test_set', 'held_out', 'micro_f1', 'mod_f1', 'unmod_f1',
             'macro_f1', 'mod_prec', 'mod_rec', 'auprc', 'auroc', 'auroc_sad',

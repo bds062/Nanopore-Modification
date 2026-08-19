@@ -84,9 +84,10 @@ def load_model(ckpt, device):
         # infer aux dims from the state dict
         proj_dim = int(sd['proj.net.2.weight'].shape[0]) if has_proj else 0
         sad_dim = int(sd['sad_head.weight'].shape[0]) if has_sad else 0
+        height = int(sd['pos'].shape[1])
         model = ConvFormerV2(dropout=0.0,
                              dann_lambda=1.0 if has_adv else 0.0,  # value irrelevant at eval
-                             supcon_dim=proj_dim, sad_dim=sad_dim)
+                             supcon_dim=proj_dim, sad_dim=sad_dim, h=height)
         model.load_state_dict(sd)
         model.to(device).eval()
         aux = []
@@ -96,7 +97,7 @@ def load_model(ckpt, device):
             aux.append(f'SupCon proj dim={proj_dim}')
         if has_sad:
             aux.append(f'DeepSAD dim={sad_dim}')
-        print(f"  checkpoint: {' + '.join(aux)} present "
+        print(f"  checkpoint: {' + '.join(aux)} present  h={height} "
               f"epoch={raw.get('epoch')} val_auprc={raw.get('val_auprc')}", flush=True)
         return model, 'convformer_v2'
 
