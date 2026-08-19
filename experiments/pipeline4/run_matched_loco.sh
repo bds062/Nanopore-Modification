@@ -67,8 +67,12 @@ if [ "${PARTITION}" == "scavenger" ]; then
     SLURM_COMMON="--partition=scavenger --account=scavenger --qos=scavenger \
 --gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} --ntasks=1 --cpus-per-task=10 --mem=48G --time=${TIME_LIMIT:-12:00:00}"
 else
+    # GRES respects GPU_TYPE same as the scavenger branch above (was hardcoded
+    # to rtxa5000 only, which stranded jobs when cbcb26 -- the ONLY rtxa5000
+    # node on this partition -- was unavailable, while cbcb27 (rtxa6000) and
+    # cbcb28-29 (rtx6000ada) sat idle because nothing could request them).
     SLURM_COMMON="--partition=cbcb --account=cbcb --qos=high \
---gres=gpu:rtxa5000:1 ${DEPENDENCY_ARG} --ntasks=1 --cpus-per-task=10 --mem=48G --time=${TIME_LIMIT:-12:00:00}"
+--gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} --ntasks=1 --cpus-per-task=10 --mem=48G --time=${TIME_LIMIT:-12:00:00}"
 fi
 
 submit() { if ${DRY_RUN}; then echo "[dry-run] sbatch $*" >&2; echo 9999; else eval "sbatch --parsable $*"; fi; }

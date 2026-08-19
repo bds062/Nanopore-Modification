@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nanopore-deepmod"
+name = "rawmod"
 version = "0.1.0"
-description = "DeepMod pileup-image models for nanopore modified-base detection"
+description = "RawMod: modification-agnostic nanopore base-modification detection from raw signal"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,9 +20,9 @@ dependencies = [
 ]
 
 [project.scripts]
-deepmod-featurize = "deepmod.featurization:main"
-deepmod-train = "deepmod.model:main"
-deepmod-visualize = "deepmod.visualization:main"
+rawmod-featurize = "deepmod.featurization:main"
+rawmod-train = "deepmod.model:main"
+rawmod-visualize = "deepmod.visualization:main"
 
 [tool.setuptools.packages.find]
 include = ["deepmod*"]

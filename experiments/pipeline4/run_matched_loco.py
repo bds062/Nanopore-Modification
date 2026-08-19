@@ -36,22 +36,22 @@ CURRICULUM DATA (EXTRA_ORGANISMS=1 / INCLUDE_HUMAN=1, BENCH:: members)
 hg002 -- no matched unmodified twin, so they never enter curriculum stage 1
 (paired anchors), but ARE unioned into every fold's stage-2 training by
 default (see fit()'s `extra` param). chem_array() never assigns these images a
-chemistry label (they sit at chem=''), which is a real trap: several BENCH::
-organisms carry the SAME chemistry as a core-pool target under a DIFFERENT
-name, and blindly including them leaks that "held-out" chemistry straight into
-training. Quantified once (2026-08-19): with both flags on, BENCH:: leaks
-131,660 6mA / 100,138 5mC / 4,807 4mC images into every fold regardless of
-which core chemistry is held out -- vs. core-pool censuses of only 40,452 /
-5,870 / 4,780 for those three (i.e. the leak outweighs the intended holdout,
-3x-17x over). 5hmC and 5hmU are never present in BENCH:: -- unaffected.
+chemistry label (they sit at chem=''), and several BENCH:: organisms carry the
+SAME chemistry as a core-pool target under a DIFFERENT name -- unaddressed,
+this leaks that "held-out" chemistry straight into training. Measured: with
+both flags on, BENCH:: leaks 131,660 6mA / 100,138 5mC / 4,807 4mC images into
+every fold regardless of which core chemistry is held out, versus core-pool
+censuses of only 40,452 / 5,870 / 4,780 for those three -- the leak outweighs
+the intended holdout by 3x-17x. 5hmC and 5hmU are never present in BENCH::
+and are unaffected.
 FIX: BENCH_ORG_CHEMS records each organism's real (REBASE/motif-characterized)
 chemistry content; loco_<CHEM> strips any BENCH:: organism whose set contains
-the held-out CHEM out of `extra_idx` before training, so "held out" really
-means never-seen-anywhere, not just absent from the core pool. NOTE: this fix
-is applied for loco_<CHEM> only -- subset_<...> (below) evaluates one trained
-model against MULTIPLE held-out targets at once, so a single clean exclusion
-isn't well-defined there; treat subset_ chemistry-leak numbers for 6mA/5mC/4mC
-with that caveat.
+the held-out CHEM out of `extra_idx` before training, so "held out" means
+never-seen-anywhere, not just absent from the core pool. This fix is applied
+for loco_<CHEM> only -- subset_<...> (below) evaluates one trained model
+against MULTIPLE held-out targets at once, so a single clean exclusion isn't
+well-defined there; read subset_ chemistry-leak numbers for 6mA/5mC/4mC with
+that caveat.
 
 FOLDS (one SLURM job each)
   loco_<CHEM>  leave-one-chemistry-out (CHEM in 5hmU/4mC/6mA/5mC/5hmC):
@@ -63,8 +63,8 @@ FOLDS (one SLURM job each)
               for 5hmU), not a trivial base-composition split.
      This is the zero-shot "modification-agnostic" test: the model is scored on a
      chemistry it never saw ANYWHERE in training, using causal negatives from
-     the same sample. These 5 folds + mixed + the 3 logo_<group> folds are the
-     final, paper-reported models (see results19/).
+     the same sample. These 5 folds, together with mixed and the 3
+     logo_<group> folds, form the primary evaluation for this pipeline.
   logo_<group>  leave-one-organism-group-out (group in bacteria/plant/mammal,
      see LOGO_GROUPS): holds out entire BENCH:: organism(s) -- never in stage-2
      training, scored zero-shot as their own test set. logo_bacteria adds
@@ -75,8 +75,8 @@ FOLDS (one SLURM job each)
      chemistry subset is zero-shot-evaluated against every chemistry NOT in
      it, so C(5,2)+C(5,3)+C(5,4)=25 unique subsets cover the full "AUROC vs
      #training-chemistries" sweep -- the 5 size-4 subsets are exactly the
-     loco_<CHEM> folds above, reused rather than retrained. Exploratory (see
-     results18_chem_diversity/), NOT part of the leak fix -- see caveat above.
+     loco_<CHEM> folds above, reused rather than retrained. Exploratory, and
+     NOT covered by the leak fix -- see caveat above.
   mixed        position-grouped 85/15 split over the whole matched pool
                (in-distribution reference point).
 
@@ -85,11 +85,10 @@ run_pipeline.train_one_model with total loss BCE + SUPCON_WEIGHT*SupCon on the
 causal labels. All model/train/eval code is imported from the repo; this file
 only assembles the matched pool and defines the LOCO splits.
 
-FINAL RECIPE (results19, the paper models): RAWMOD_DATA_GEN=strand15
-EXTRA_ORGANISMS=1 INCLUDE_HUMAN=1 SUPCON_DIM=128 SUPCON_WEIGHT=1.0
-SUPCON_TEMP=0.20 CURRICULUM=1 CURRICULUM_EPOCHS=15 SAD_DIM=32 SAD_WEIGHT=1.0
-SAD_ETA=1.0 BCE_WEIGHT=1.0 -- see run_matched_loco.sh and the repo README for
-the full launch command.
+CURRENT RECIPE: RAWMOD_DATA_GEN=strand15 EXTRA_ORGANISMS=1 INCLUDE_HUMAN=1
+SUPCON_DIM=128 SUPCON_WEIGHT=1.0 SUPCON_TEMP=0.20 CURRICULUM=1
+CURRICULUM_EPOCHS=15 SAD_DIM=32 SAD_WEIGHT=1.0 SAD_ETA=1.0 BCE_WEIGHT=1.0 --
+see run_matched_loco.sh and the repo README for the full launch command.
 
 Usage:
   python run_matched_loco.py \
@@ -155,10 +154,10 @@ NEG_CAP = {'ONT::': 30000, 'SPO1::': 40000, 'HP::': 40000}
 # into loco_<CHEM> training via fit()'s always-included bench_idx: e.g.
 # loco_6mA nominally excludes all 6mA from the core pool, but 6 of 7 BENCH::
 # organisms are Dam-like 6mA and were still unioned into stage-2 training
-# regardless. Quantified once (see chat/insights, 2026-08-19): with
-# EXTRA_ORGANISMS=1+INCLUDE_HUMAN=1, BENCH:: leaks 131,660 6mA / 100,138 5mC /
-# 4,807 4mC images into every fold's training -- vs. core-pool censuses of
-# only 40,452 / 5,870 / 4,780 for those chemistries respectively (i.e. the
+# regardless. Measured: with EXTRA_ORGANISMS=1+INCLUDE_HUMAN=1, BENCH:: leaks
+# 131,660 6mA / 100,138 5mC / 4,807 4mC images into every fold's training --
+# vs. core-pool censuses of only 40,452 / 5,870 / 4,780 for those chemistries
+# respectively (i.e. the
 # leaked signal outweighs what was supposedly held out, 3x-17x over). 5hmC and
 # 5hmU are never present in BENCH:: -- those two folds were never affected.
 # Used by loco_<CHEM> to strip chemistry-matching BENCH:: organisms out of
