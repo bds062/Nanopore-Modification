@@ -50,19 +50,25 @@ for BC in $BARCODES; do
     # reads. the BAM is already sorted+indexed on the share, so use it in place
     [ -f $W/$BC.fastq ] || $SAM fastq -F 0x900 $BAM > $W/$BC.fastq
 
-    $F5C index --slow5 $W/$BC.blow5 $W/$BC.fastq
-    $F5C eventalign --pore $PORE --min-recalib-events $MINRECALIB \
-        --signal-index --scale-events --collapse-events --secondary=no -t $T \
-        --slow5 $W/$BC.blow5 --reads $W/$BC.fastq \
-        --bam $BAM --genome $REF \
-        --summary $W/$BC.summary > $W/$BC.eventalign 2> $W/eventalign.log
+    # eventalign is the expensive step (~3h for a 700MB BAM), so keep any
+    # completed output on a rerun
+    if [ ! -s $W/$BC.eventalign ]; then
+        $F5C index --slow5 $W/$BC.blow5 $W/$BC.fastq
+        $F5C eventalign --pore $PORE --min-recalib-events $MINRECALIB \
+            --signal-index --scale-events --collapse-events --secondary=no -t $T \
+            --slow5 $W/$BC.blow5 --reads $W/$BC.fastq \
+            --bam $BAM --genome $REF \
+            --summary $W/$BC.summary > $W/$BC.eventalign 2> $W/eventalign.log
+    else
+        echo "$BC: reusing existing eventalign ($(du -h $W/$BC.eventalign | cut -f1))"
+    fi
 
     # yield check: this is what bit us on the synthetic data
     TOT=$(grep -c "^@" $W/$BC.fastq || true)
     BAD=$(grep -c "could not calibrate" $W/eventalign.log || true)
     echo "$BC reads=$TOT could-not-calibrate=$BAD"
 
-    $SAM mpileup -f $REF $BAM > $W/$BC.pileup 2>/dev/null
+    [ -s $W/$BC.pileup ] || $SAM mpileup -f $REF $BAM > $W/$BC.pileup 2>/dev/null
 
     orca-pred_signal_feature_ext --eventalign $W/$BC.eventalign --work_dir $W --prefix $BC --n_processes $T
     orca-pred_bascal_feature_ext  --pileup     $W/$BC.pileup     --work_dir $W --prefix $BC --n_processes $T
