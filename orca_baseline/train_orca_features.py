@@ -199,9 +199,9 @@ def train_one(held, data, args, device, seed=0):
         model.train()
         for x, y, d in dl_tr:
             x, y, d = x.to(device), y.to(device), d.to(device)
-            lam = grl_lambda(step, total)
+            lam = args.grl_max * grl_lambda(step, total)
             ce, dm = model(x, lam)
-            loss = nll(ce, y) + ce_dom(dm, d)
+            loss = nll(ce, y) + args.dom_weight * ce_dom(dm, d)
             opt.zero_grad(); loss.backward(); opt.step(); step += 1
         vm = evaluate(model, dl_val, device)
         if vm["auprc"] == vm["auprc"] and vm["auprc"] > best_val:
@@ -231,6 +231,12 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--grl-max", type=float, default=1.0,
+                    help="cap on the gradient-reversal lambda. The v3 run at 1.0 "
+                         "collapsed the embedding to rank99=10-25 of 640, so lower "
+                         "values trade domain invariance for a usable representation")
+    ap.add_argument("--dom-weight", type=float, default=1.0,
+                    help="weight on the domain (adversarial) loss term")
     ap.add_argument("--holdouts", default="5mC,5hmC,6mA")
     ap.add_argument("--seeds", default="0,1,2")
     args = ap.parse_args()
