@@ -26,6 +26,11 @@ MODE=${MODE:-single_end}        # single_end matches the single-stranded results
 POD5_SUB=${POD5_SUB:-}          # set to "high_quality" for the filtered subset
 BARCODES=${BARCODES:-"barcode01 barcode02 barcode03 barcode04 barcode05 barcode06 barcode07"}
 MINRECALIB=${MINRECALIB:-200}   # long reads: keep f5c's default
+# SPO1 is a ~132kb genome with ~695k reads, so per-site depth runs into the
+# thousands and ORCA's per-contig concat OOMs. Its signal features are sorted
+# quantiles (depth invariant, min depth 10), so a few percent of reads is
+# plenty. Set FRAC= to disable.
+FRAC=${FRAC:-0.05}
 PORE=${PORE:-r10}
 T=${T:-4}
 
@@ -33,7 +38,7 @@ POD5_DIR=$DATA/pod5_by_barcode/$RUN/$MODE${POD5_SUB:+/$POD5_SUB}
 BAM_DIR=$DATA/mapping/$RUN/$MODE
 
 for BC in $BARCODES; do
-    W=$OUT/$RUN/$MODE/$BC
+    W=$OUT/$RUN/$MODE/$BC${FRAC:+_sub$FRAC}
     mkdir -p $W
     echo "==================== $RUN $MODE $BC ===================="
     date
@@ -47,7 +52,18 @@ for BC in $BARCODES; do
     # pod5 -> blow5 (skip if already done)
     [ -f $W/$BC.blow5 ] || blue-crab p2s $POD5 -o $W/$BC.blow5
 
-    # reads. the BAM is already sorted+indexed on the share, so use it in place
+    # subsample reads to keep the per-contig concat in ORCA's feature extraction
+    # within memory. the share is read-only, so the subset lands in the workspace
+    if [ -n "$FRAC" ]; then
+        if [ ! -s $W/$BC.sub.bam ]; then
+            $SAM view -s $FRAC -b -@ $T $BAM > $W/$BC.sub.bam
+            $SAM index $W/$BC.sub.bam
+        fi
+        BAM=$W/$BC.sub.bam
+        echo "$BC: using $FRAC subsample ($($SAM view -c -@ $T $BAM) reads)"
+    fi
+
+    # reads. the BAM is already sorted+indexed, so use it in place
     [ -f $W/$BC.fastq ] || $SAM fastq -F 0x900 $BAM > $W/$BC.fastq
 
     # eventalign is the expensive step (~3h for a 700MB BAM), so keep any
