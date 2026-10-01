@@ -1,9 +1,10 @@
 #!/bin/bash
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
-REPO=/fs/nexus-scratch/bds062/Nanopore-Modification
+REPO=${RAWMOD_REPO}
 SCRIPT=${REPO}/analysis/orca_remake/loco_embedding_cluster.py
-LOGDIR=/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results4/embedding_clustering_per_fold/logs
-PYENV="source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && conda activate /fs/nexus-scratch/bds062/envs/mod"
+LOGDIR=${RAWMOD_RESULTS}/rawmod_matched_loco/results4/embedding_clustering_per_fold/logs
+PYENV="source ${CONDA_SH} && conda activate ${RAWMOD_ENV}"
 mkdir -p "${LOGDIR}"
 sbatch --job-name=loco_embed_cluster \
     --partition=scavenger --account=scavenger --qos=scavenger \

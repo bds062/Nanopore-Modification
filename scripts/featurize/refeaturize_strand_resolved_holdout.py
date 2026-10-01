@@ -13,20 +13,25 @@ Holdout regions come from scripts/ground_truth/select_holdout_regions.py; this
 is the strand-resolved counterpart of refeaturize_strand15_holdout.py.
 
 Point a training run at the result with:
-  RAWMOD_STRANDRES_ROOT=/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved_holdout/features
+  RAWMOD_STRANDRES_ROOT=$RAWMOD_STORE/rawmod_strand_resolved_holdout/features
 
 Usage:
   python refeaturize_strand_resolved_holdout.py --dry-run
   python refeaturize_strand_resolved_holdout.py [--dependency JOBIDS] [--only NAME,NAME]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
 import refeaturize_strand_resolved as base
 
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
-OUT = Path('/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved_holdout')
+GT_ROOT = f'{RAWMOD_DATA}/gt'
+OUT = Path(f'{RAWMOD_STORE}/rawmod_strand_resolved_holdout')
 
 # One holdout region per REFERENCE, so datasets sharing a genome share a BED
 # (see select_holdout_regions.py).

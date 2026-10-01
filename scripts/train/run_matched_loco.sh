@@ -9,6 +9,7 @@
 #
 # Usage (login node):
 #   bash run_matched_loco.sh [--dry-run] [--epochs N] [--seed N]
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
 
 DRY_RUN=false; EPOCHS_ARG=""; SEED_ARG=""
@@ -24,11 +25,11 @@ done
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="${REPO_DIR}/run_matched_loco.py"
-OUT=/fs/cbcb-scratch/bds062/results/rawmod_matched_loco
+OUT=${RAWMOD_RESULTS}/rawmod_matched_loco
 OUTDIR=${OUTDIR:-${OUT}/results1}
 LOGDIR=${OUT}/logs
-PYTHON=/fs/nexus-scratch/bds062/envs/mod/bin/python
-CONDA_INIT="source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && conda activate /fs/nexus-scratch/bds062/envs/mod"
+PYTHON=${RAWMOD_ENV}/bin/python
+CONDA_INIT="source ${CONDA_SH} && conda activate ${RAWMOD_ENV}"
 mkdir -p "${LOGDIR}"
 
 DEFAULT_FOLDS=(mixed loco_5hmU loco_4mC loco_6mA loco_5mC loco_5hmC)
@@ -40,7 +41,7 @@ if [ -n "${FOLDS:-}" ]; then
 else
     FOLDS=("${DEFAULT_FOLDS[@]}")
 fi
-PARTITION=${PARTITION:-cbcb}
+PARTITION=${PARTITION:-${RAWMOD_SLURM_PARTITION:-gpu}}
 # GPU_TYPE empty (default on scavenger) = any GPU type in the partition, for max
 # scheduling flexibility; set e.g. GPU_TYPE=rtxa6000 to pin to a specific type.
 GPU_TYPE=${GPU_TYPE:-}
@@ -49,8 +50,8 @@ GRES="gpu:${GPU_TYPE:+${GPU_TYPE}:}1"
 # (gtxtitanx/gtx1080ti/titanxp/titanxpascal/p6000/p100 -- compute capability <7.5)
 # is excluded: those cards are too old for our PyTorch build ("no kernel image
 # available" CUDA error), and a node can mix an old card alongside a compatible
-# one (e.g. cbcb25 = rtx2080ti + gtx1080ti) so node-name filtering alone missed
-# it once. Keyed off GRES GPU model, not node name. Excluded by default whenever
+# one (e.g. rtx2080ti + gtx1080ti) so node-name filtering alone can miss
+# it. Keyed off GRES GPU model, not node name. Excluded by default whenever
 # GPU_TYPE is left open; override EXCLUDE_NODES="" to disable.
 EXCLUDE_NODES=${EXCLUDE_NODES-$(sinfo -N -o "%N %G" 2>/dev/null | \
     grep -iE "gtxtitanx|gtx1080ti|titanxp|titanxpascal|p6000|p100" | \
@@ -71,17 +72,16 @@ fi
 # reads from the same NFS feature files and that triggered errno-5 read failures.
 BEGIN_ARG=""
 if [ -n "${BEGIN:-}" ]; then BEGIN_ARG="--begin=${BEGIN}"; fi
+# Partition/account/QoS: PARTITION (default $RAWMOD_SLURM_PARTITION), with account and
+# QoS from SLURM_ACCOUNT / SLURM_QOS (default: account = partition, QoS = $RAWMOD_SLURM_QOS
+# or none). A "scavenger" partition uses its own account and QoS.
 if [ "${PARTITION}" == "scavenger" ]; then
-    SLURM_COMMON="--partition=scavenger --account=scavenger --qos=scavenger \
---gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} ${BEGIN_ARG} --ntasks=1 --cpus-per-task=${CPUS:-10} --mem=48G --time=${TIME_LIMIT:-12:00:00}"
-else
-    # GRES respects GPU_TYPE same as the scavenger branch above (was hardcoded
-    # to rtxa5000 only, which stranded jobs when cbcb26 -- the ONLY rtxa5000
-    # node on this partition -- was unavailable, while cbcb27 (rtxa6000) and
-    # cbcb28-29 (rtx6000ada) sat idle because nothing could request them).
-    SLURM_COMMON="--partition=cbcb --account=cbcb --qos=high \
---gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} ${BEGIN_ARG} --ntasks=1 --cpus-per-task=${CPUS:-10} --mem=48G --time=${TIME_LIMIT:-12:00:00}"
+    SLURM_ACCOUNT=${SLURM_ACCOUNT:-scavenger}; SLURM_QOS=${SLURM_QOS:-scavenger}
 fi
+SLURM_ACCOUNT=${SLURM_ACCOUNT:-${PARTITION}}
+SLURM_QOS=${SLURM_QOS:-${RAWMOD_SLURM_QOS:-}}
+SLURM_COMMON="--partition=${PARTITION} --account=${SLURM_ACCOUNT} ${SLURM_QOS:+--qos=${SLURM_QOS}} \
+--gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} ${BEGIN_ARG} --ntasks=1 --cpus-per-task=${CPUS:-10} --mem=48G --time=${TIME_LIMIT:-12:00:00}"
 
 submit() { if ${DRY_RUN}; then echo "[dry-run] sbatch $*" >&2; echo 9999; else eval "sbatch --parsable $*"; fi; }
 
@@ -95,7 +95,7 @@ SAD_DIM=${SAD_DIM:-0} SAD_WEIGHT=${SAD_WEIGHT:-1.0} SAD_ETA=${SAD_ETA:-1.0} \
 BCE_WEIGHT=${BCE_WEIGHT:-1.0} \
 RAWMOD_DATA_GEN=${RAWMOD_DATA_GEN:-} EXTRA_ORGANISMS=${EXTRA_ORGANISMS:-0} \
 INCLUDE_HUMAN=${INCLUDE_HUMAN:-0} TF_LAYERS=${TF_LAYERS:-2} ROW_EMB=${ROW_EMB:-1} \
-RAWMOD_STRANDRES_ROOT=${RAWMOD_STRANDRES_ROOT:-/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved/features} \
+RAWMOD_STRANDRES_ROOT=${RAWMOD_STRANDRES_ROOT:-${RAWMOD_STORE}/rawmod_strand_resolved/features} \
 RAWMOD_DROP_CH9=${RAWMOD_DROP_CH9:-0} \
 ${PYTHON} ${DRIVER} --fold ${FOLD} --out-dir ${OUTDIR} ${EPOCHS_ARG} ${SEED_ARG}"
     JID=$(submit "${SLURM_COMMON} --job-name=mloco_${FOLD} \

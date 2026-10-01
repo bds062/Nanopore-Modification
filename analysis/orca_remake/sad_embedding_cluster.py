@@ -36,6 +36,11 @@ Outputs (under results4/embedding_clustering/):
   clustering_metrics.tsv         machine-readable version of the above
   figures/fig_embedding_cluster.png   2x2 PCA/t-SNE, colored by type and by organism
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import io
 import os
 import sys
@@ -49,7 +54,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'test',
            REPO / 'scripts' / 'train',
@@ -65,9 +70,9 @@ from sklearn.decomposition import PCA                           # noqa: E402
 from sklearn.manifold import TSNE                               # noqa: E402
 from sklearn.metrics import adjusted_rand_score                 # noqa: E402
 
-CKPT = Path('/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results5/'
+CKPT = Path(f'{RAWMOD_RESULTS}/rawmod_matched_loco/results5/'
             'models/mixed/mixed/best_model.pt')
-OUT = Path('/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results4/embedding_clustering')
+OUT = Path(f'{RAWMOD_RESULTS}/rawmod_matched_loco/results4/embedding_clustering')
 
 MAX_PER_GROUP = 3000        # cap per (type, organism) group
 SEED = 0

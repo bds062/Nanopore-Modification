@@ -11,15 +11,13 @@
 #               MIN_COV(5) MIN_READS(25)
 #
 #SBATCH --job-name=refeat
-#SBATCH --partition=cbcb
-#SBATCH --account=cbcb
-#SBATCH --qos=high
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --output=/fs/cbcb-scratch/bds062/logs/%x_%j.out
+#SBATCH --output=%x_%j.out
 
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
 
 : "${DATASET:?}" ; : "${REF:?}" ; : "${GT_BED:?}" ; : "${PILEUP:?}" ; : "${OUTDIR:?}"
@@ -30,17 +28,17 @@ NEG_MAX_FRAC=${NEG_MAX_FRAC:-10.0}
 MIN_COV=${MIN_COV:-5}
 MIN_READS=${MIN_READS:-25}
 
-PY=/fs/nexus-scratch/bds062/envs/mod/bin/python
-FEATURIZE=/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod/featurization.py
-BUILDCAND=/fs/cbcb-scratch/bds062/scripts/build_screened_candidates.py
-LEVEL_TABLE=/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/extern/local_kmer_models/uncalled_r1041_model_only_means.txt
-SRCDIR=/fs/cbcb-scratch/bds062/results/benchmark_results/${DATASET}
+PY=${RAWMOD_ENV}/bin/python
+FEATURIZE=${RAWMOD_REPO}/rawmod/featurization.py
+BUILDCAND=${RAWMOD_SCRATCH}/scripts/build_screened_candidates.py
+LEVEL_TABLE=${RAWHASH2_DIR}/extern/local_kmer_models/uncalled_r1041_model_only_means.txt
+SRCDIR=${RAWMOD_RESULTS}/benchmark_results/${DATASET}
 POD5_DIR=$(dirname "${SRCDIR}")   # placeholder; set below from known layout
 
 # POD5 dir (same layout as submit_all.sh)
 case "${DATASET}" in
-  arabidopsis) POD5_DIR=/fs/cbcb-scratch/bds062/data/benchmark/arabidopsis/pod5 ;;
-  *)           POD5_DIR=/fs/cbcb-scratch/bds062/data/benchmark/bacteria/${DATASET}/pod5 ;;
+  arabidopsis) POD5_DIR=${RAWMOD_DATA}/benchmark/arabidopsis/pod5 ;;
+  *)           POD5_DIR=${RAWMOD_DATA}/benchmark/bacteria/${DATASET}/pod5 ;;
 esac
 
 mkdir -p "${OUTDIR}"
@@ -74,7 +72,7 @@ echo "=== [2/2] featurize with screened candidates — $(date) ==="
     --max-images-per-base 1
 
 echo "=== [3/3] rechunk to 1 image/chunk for streaming — $(date) ==="
-"${PY}" /fs/cbcb-scratch/bds062/scripts/rechunk_features.py "${OUTDIR}/features.h5"
+"${PY}" ${RAWMOD_SCRATCH}/scripts/rechunk_features.py "${OUTDIR}/features.h5"
 
 echo "=== done ${DATASET} — $(date) ==="
 "${PY}" - "${OUTDIR}/features.h5" <<'PYEOF'

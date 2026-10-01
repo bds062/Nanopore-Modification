@@ -19,19 +19,24 @@ of reimplementing anything:
 
 Usage:
   python test_external_sites.py \
-    --sites /fs/cbcb-lab/storm/ernzhang/rawmod_data/ecoli_scores/Ecoli_WT_5kHz_scores.tsv.gz \
-    --pod5 /fs/cbcb-lab/storm/bds062/data/benchmark/bacteria/Ecoli_WT_5kHz/pod5 \
-    --bam /fs/cbcb-scratch/bds062/results/benchmark_results/Ecoli_WT_5kHz/reads_refined.bam \
-    --peaks /fs/cbcb-scratch/bds062/results/benchmark_results/Ecoli_WT_5kHz/peaks_refined.tsv \
-    --gt /fs/cbcb-scratch/bds062/data/gt/Ecoli_WT/gt_modified.bed \
-    --checkpoint /fs/cbcb-scratch/bds062/results/rawmod_matched_loco/<results_dir>/models/logo_bacteria/logo/best_model.pt \
-    --out-dir /fs/cbcb-scratch/bds062/results/rawmod_matched_loco/<results_dir>/external_tests/Ecoli_WT_5kHz
+    --sites sites.tsv \
+    --pod5 $RAWMOD_STORE/data/benchmark/bacteria/Ecoli_WT_5kHz/pod5 \
+    --bam $RAWMOD_RESULTS/benchmark_results/Ecoli_WT_5kHz/reads_refined.bam \
+    --peaks $RAWMOD_RESULTS/benchmark_results/Ecoli_WT_5kHz/peaks_refined.tsv \
+    --gt $RAWMOD_DATA/gt/Ecoli_WT/gt_modified.bed \
+    --checkpoint $RAWMOD_RESULTS/rawmod_matched_loco/<results_dir>/models/logo_bacteria/logo/best_model.pt \
+    --out-dir $RAWMOD_RESULTS/rawmod_matched_loco/<results_dir>/external_tests/Ecoli_WT_5kHz
 
 Writes <out-dir>/features.h5 (the freshly featurized+labeled sites),
 <out-dir>/metrics.tsv (one row: auroc/f1/etc., same columns as
 run_matched_loco.py's metrics/<fold>.tsv), and <out-dir>/scores.tsv
 (per-position: contig, pos, predicted score, GT label).
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWHASH2_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 import sys
@@ -51,7 +56,7 @@ from score_genome import load_model              # noqa: E402
 
 PYTHON = sys.executable    # featurize with the same interpreter/env running this script
 FEATURIZE = str(REPO / 'rawmod' / 'featurization.py')
-DEFAULT_LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/'
+DEFAULT_LEVEL_TABLE = (f'{RAWHASH2_DIR}/'
                        'extern/local_kmer_models/uncalled_r1041_model_only_means.txt')
 
 

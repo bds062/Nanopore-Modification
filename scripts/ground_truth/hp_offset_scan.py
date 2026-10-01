@@ -10,11 +10,16 @@ measurement behind Fig. 1b, reused here per motif offset.
 Both libraries' images span +-10 bases, so every candidate offset is already
 covered by the existing features; nothing needs re-featurizing.
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import gzip, re, sys
 import numpy as np, h5py
 
-F = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features'
-REF = '/fs/cbcb-lab/storm/bds062/data/benchmark/references/hpylori_26695.fa.gz'
+F = f'{RAWMOD_RESULTS}/rawmod_full_pipeline4/features'
+REF = f'{RAWMOD_STORE}/data/benchmark/references/hpylori_26695.fa.gz'
 HALF, L, W = 10, 10, 21
 MOTIFS = [('GCATG', '4mC', 1), ('CTTCAAG', '6mA', 6), ('TCTTC', '4mC', 3)]
 COMP = str.maketrans('ACGT', 'TGCA')

@@ -18,7 +18,7 @@ NOT included:
 Reuses EXISTING reads_refined.bam / peaks_refined.tsv / gt_modified.bed /
 candidate.bed (produced by the older benchmark pipeline, pipeline/pipeline.sh
 + submit_all.sh) -- only the pod5 path changed (moved to
-/fs/cbcb-lab/storm/bds062/data/benchmark, or /fs/cbcb-scratch/bds062/data/human
+$RAWMOD_STORE/data/benchmark, or $RAWMOD_DATA/human
 for hg001/hg002) and the featurization flags are new (--strand + --min-mapq 0
 per this round's explicit request, vs the old pipeline's --min-mapq 60 and
 both-strand pooling).
@@ -34,22 +34,27 @@ Usage:
   python refeaturize_benchmark.py
   python refeaturize_benchmark.py --only Anabaena_WT_5kHz,arabidopsis,hg001
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import CONDA_SH, PYTHON, RAWHASH2_DIR, RAWMOD_DATA, RAWMOD_ENV, RAWMOD_RESULTS, RAWMOD_STORE, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
-PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
-CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
-             'conda activate /fs/nexus-scratch/bds062/envs/mod')
+PYTHON = f'{PYTHON}'
+FEATURIZE = f'{REPO_DIR}/rawmod/featurization.py'
+CONDA_INIT = (f'source {CONDA_SH} && '
+             f'conda activate {RAWMOD_ENV}')
 
-POD5_ROOT = '/fs/cbcb-lab/storm/bds062/data/benchmark'
-HUMAN_POD5_ROOT = '/fs/cbcb-scratch/bds062/data/human'
-OLD_RESULTS = '/fs/cbcb-scratch/bds062/results/benchmark_results'
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
-LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/extern/'
+POD5_ROOT = f'{RAWMOD_STORE}/data/benchmark'
+HUMAN_POD5_ROOT = f'{RAWMOD_DATA}/human'
+OLD_RESULTS = f'{RAWMOD_RESULTS}/benchmark_results'
+GT_ROOT = f'{RAWMOD_DATA}/gt'
+LEVEL_TABLE = (f'{RAWHASH2_DIR}/extern/'
               'local_kmer_models/uncalled_r1041_model_only_means.txt')
-OUT_ROOT = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features/benchmark'
+OUT_ROOT = f'{RAWMOD_RESULTS}/rawmod_full_pipeline4/features/benchmark'
 
 # common flags: single-strand convention (matches rawmod_full_pipeline4's
 # strand15 data -- height 16, 15-read pileups), min-mapq=0 per this round's

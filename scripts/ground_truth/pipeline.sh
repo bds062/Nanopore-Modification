@@ -13,41 +13,39 @@
 #                   ambiguous sites from being mislabeled as negative.
 #   RECURSIVE     - set to "true" to pass --recursive to Dorado (for nested pod5 dirs)
 
-#SBATCH --partition=cbcb
-#SBATCH --account=cbcb
-#SBATCH --qos=high
 #SBATCH --gres=gpu:rtxa5000:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
-#SBATCH --output=/fs/cbcb-scratch/bds062/logs/%x_%j.out
-#SBATCH --error=/fs/cbcb-scratch/bds062/logs/%x_%j.err
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
 
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
 
-mkdir -p /fs/cbcb-scratch/bds062/logs
+mkdir -p ${RAWMOD_SCRATCH}/logs
 
 # ── Initialize conda (required for Remora and featurization steps) ─────────────
-CONDA_BASE=/nfshomes/bds062/miniconda3
+CONDA_BASE=${CONDA_BASE}
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 
 # ── Fixed paths ────────────────────────────────────────────────────────────────
-SHARED=/fs/cbcb-lab/storm/shared/rawhash2
+SHARED=${RAWMOD_SHARED}/rawhash2
 DORADO_BIN=${SHARED}/basecallers/dorado-0.9.2-linux-x64/bin/dorado
 MODEL=${SHARED}/basecallers/dorado-0.9.2-linux-x64/bin/dna_r10.4.1_e8.2_400bps_sup@v5.0.0
-RAWHASH2=/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm
+RAWHASH2=${RAWHASH2_DIR}
 SCRIPTS=${RAWHASH2}/test/benchmark/scripts
 LEVEL_TABLE=${RAWHASH2}/extern/local_kmer_models/uncalled_r1041_model_only_means.txt
-FEATURIZE=/fs/nexus-scratch/bds062/Nanopore-Modification/deepmod/featurization.py
-FEATURIZE_ENV=/fs/nexus-scratch/bds062/envs/mod
+FEATURIZE=${RAWMOD_REPO}/rawmod/featurization.py
+FEATURIZE_ENV=${RAWMOD_ENV}
 
 # ── Validate required env vars ─────────────────────────────────────────────────
 : "${DATASET:?DATASET env var is required}"
 : "${POD5_DIR:?POD5_DIR env var is required}"
 : "${REF:?REF env var is required}"
 
-OUTDIR=/fs/cbcb-scratch/bds062/results/benchmark_results/${DATASET}
+OUTDIR=${RAWMOD_RESULTS}/benchmark_results/${DATASET}
 mkdir -p "${OUTDIR}"
 
 echo "================================================================"

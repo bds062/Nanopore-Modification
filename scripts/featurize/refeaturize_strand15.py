@@ -41,21 +41,26 @@ Usage:
   python refeaturize_strand15.py                # submit all 13 jobs
   python refeaturize_strand15.py --only HP26695_WT_5kHz,barcode06   # subset
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import CONDA_SH, PYTHON, RAWHASH2_DIR, RAWMOD_DATA, RAWMOD_ENV, RAWMOD_LEGACY_DATA, RAWMOD_LEGACY_RESULTS, RAWMOD_RESULTS, RAWMOD_SHARED, RAWMOD_STORE, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
-RAWHASH2_LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/'
+RAWHASH2_LEVEL_TABLE = (f'{RAWHASH2_DIR}/'
                         'extern/local_kmer_models/uncalled_r1041_model_only_means.txt')
-ONT_LEVEL_TABLE = '/fs/nexus-scratch/bds062/results/uncalled_r1041_model_only_means.txt'
+ONT_LEVEL_TABLE = f'{RAWMOD_LEGACY_RESULTS}/uncalled_r1041_model_only_means.txt'
 
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
-PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
-             'conda activate /fs/nexus-scratch/bds062/envs/mod')
-OUT_ROOT = Path('/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4')
+FEATURIZE = f'{REPO_DIR}/rawmod/featurization.py'
+PYTHON = f'{PYTHON}'
+CONDA_INIT = (f'source {CONDA_SH} && '
+             f'conda activate {RAWMOD_ENV}')
+OUT_ROOT = Path(f'{RAWMOD_RESULTS}/rawmod_full_pipeline4')
 
-UMBC = '/fs/cbcb-lab/storm/shared/umbc-ont-data'
+UMBC = f'{RAWMOD_SHARED}/umbc-ont-data'
 BC_POD5 = f'{UMBC}/pod5_by_barcode/run1_jan31/single_end/high_quality'
 BC_BAM = f'{UMBC}/basecalled/run1_jan31/single_end/high_quality'
 
@@ -96,29 +101,29 @@ BC_TEST_COMMON = '--min-reads 5 --min-mapq 30 --normalize --max-images-per-base 
 # Original used the script default min-mapq (60); standardized to 30 per user
 # request (min-mapq 30 for everything, matching the SPO1/UMCES lineage).
 ONT_COMMON = '--normalize --max-images-per-base 5 --min-mapq 30'
-ONT_ROOT = '/fs/nexus-scratch/bds062/results'
+ONT_ROOT = f'{RAWMOD_LEGACY_RESULTS}'
 
 DATASETS = [
     # -- HP --
     dict(name='HP26695_WT_5kHz',
-        # Original path (/fs/cbcb-scratch/.../data/benchmark/...) no longer
-        # exists -- this data now lives under cbcb-lab (matching
+        # Original path ($RAWMOD_DATA/benchmark/...) no longer
+        # exists -- this data now lives under $RAWMOD_STORE (matching
         # refeaturize_benchmark.py's POD5_ROOT for every other curriculum
         # organism); found when a from-scratch rerun of this script failed
         # with "0 reads in pod5" for both HP26695 datasets.
-        pod5='/fs/cbcb-lab/storm/bds062/data/benchmark/bacteria/HP26695_WT_5kHz/pod5',
-        bam='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/reads_refined.bam',
-        peaks='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/peaks_refined.tsv',
+        pod5=f'{RAWMOD_STORE}/data/benchmark/bacteria/HP26695_WT_5kHz/pod5',
+        bam=f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WT_5kHz/reads_refined.bam',
+        peaks=f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WT_5kHz/peaks_refined.tsv',
         level_table=RAWHASH2_LEVEL_TABLE,
-        gt='/fs/cbcb-scratch/bds062/data/gt/hpylori_26695/gt_modified.bed',
-        candidate='/fs/cbcb-scratch/bds062/data/gt/hpylori_26695/candidate.bed',
+        gt=f'{RAWMOD_DATA}/gt/hpylori_26695/gt_modified.bed',
+        candidate=f'{RAWMOD_DATA}/gt/hpylori_26695/candidate.bed',
         extra=HP_COMMON, out='HP26695_WT_5kHz/features.h5'),
     dict(name='HP26695_WGA_5kHz',
-        pod5='/fs/cbcb-lab/storm/bds062/data/benchmark/bacteria/HP26695_WGA_5kHz/pod5',
-        bam='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/reads_refined.bam',
-        peaks='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/peaks_refined.tsv',
+        pod5=f'{RAWMOD_STORE}/data/benchmark/bacteria/HP26695_WGA_5kHz/pod5',
+        bam=f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WGA_5kHz/reads_refined.bam',
+        peaks=f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WGA_5kHz/peaks_refined.tsv',
         level_table=RAWHASH2_LEVEL_TABLE,
-        gt='/fs/cbcb-scratch/bds062/data/gt/empty.bed',
+        gt=f'{RAWMOD_DATA}/gt/empty.bed',
         candidate=None,
         extra=HP_WGA_COMMON, out='HP26695_WGA_5kHz/features.h5'),
 ]
@@ -130,8 +135,8 @@ for bc in ('06', '07'):
         bam=f'{BC_BAM}/barcode{bc}/reads.bam',
         peaks=f'{BC_BAM}/barcode{bc}/peaks_refined.tsv',
         level_table=RAWHASH2_LEVEL_TABLE,
-        gt=f'/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/gt/barcode{bc}/gt_combined.bed',
-        candidate=f'/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/gt/barcode{bc}/candidate.bed',
+        gt=f'{RAWMOD_RESULTS}/deepmod_ont+umces/gt/barcode{bc}/gt_combined.bed',
+        candidate=f'{RAWMOD_RESULTS}/deepmod_ont+umces/gt/barcode{bc}/candidate.bed',
         extra=BC0607_COMMON, out=f'deepmod_ont+umces/barcode{bc}.h5'))
 
 for bc in ('02', '03', '04', '05'):
@@ -155,12 +160,12 @@ DATASETS.append(dict(
 
 for mod in ('control', '5mC', '5hmC', '6mA'):
     gt_path = ('BARE' if mod == 'control' else
-              f'/fs/nexus-scratch/bds062/data/ont-os/references/all_5mers_{mod}_sites.bed')
+              f'{RAWMOD_LEGACY_DATA}/ont-os/references/all_5mers_{mod}_sites.bed')
     DATASETS.append(dict(
         name=f'ONT_{mod}',
-        pod5=f'/fs/nexus-scratch/bds062/data/ont-os/subset_{mod}/{mod}_rep1.pod5',
-        bam=f'/fs/nexus-scratch/bds062/results/event_clustering_{mod}/basecalled/reads_refined.bam',
-        peaks=f'/fs/nexus-scratch/bds062/results/event_clustering_{mod}/basecalled/peaks_refined.tsv',
+        pod5=f'{RAWMOD_LEGACY_DATA}/ont-os/subset_{mod}/{mod}_rep1.pod5',
+        bam=f'{RAWMOD_LEGACY_RESULTS}/event_clustering_{mod}/basecalled/reads_refined.bam',
+        peaks=f'{RAWMOD_LEGACY_RESULTS}/event_clustering_{mod}/basecalled/peaks_refined.tsv',
         level_table=ONT_LEVEL_TABLE,
         gt=gt_path, candidate=None,
         extra=ONT_COMMON, out=f'ONT/{mod}.h5'))

@@ -9,6 +9,11 @@ mod-vs-unmod and organism, not type.
 
 Usage: python results15_embedding_allorg.py --ckpt <path> --out-dir <dir>
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import sys
 from collections import Counter
 from pathlib import Path
@@ -20,7 +25,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'train', REPO / 'rawmod', REPO / 'scripts' / 'test'):
     sys.path.insert(0, str(_p))

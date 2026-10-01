@@ -96,6 +96,11 @@ Usage:
               logo_bacteria|logo_plant|logo_mammal|subset_<c1>+<c2>[+c3]} \
       --out-dir <dir> [--epochs N]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_RESULTS, RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import collections
 import argparse
 import json
@@ -120,7 +125,7 @@ from model import split_position_groups            # noqa: E402
 from mod_types import build_umces_mod_map          # noqa: E402
 
 # ── W&B (mirrors pipeline2) ────────────────────────────────────────────────────
-WANDB_ENTITY = os.environ.get('WANDB_ENTITY', 'bds062-university-of-maryland')
+WANDB_ENTITY = os.environ.get('WANDB_ENTITY') or None   # None = the logged-in wandb account
 WANDB_PROJECT = os.environ.get('WANDB_PROJECT', 'rawmod')
 
 CHEMS = ('5hmU', '4mC', '6mA', '5mC', '5hmC')
@@ -208,8 +213,8 @@ BENCH_ORG_CHEMS = {
     'hg002':               {'5mC'},
 }
 
-HP_WT  = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/features.h5'
-HP_WGA = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/features.h5'
+HP_WT  = f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WT_5kHz/features.h5'
+HP_WGA = f'{RAWMOD_RESULTS}/benchmark_results/HP26695_WGA_5kHz/features.h5'
 
 # Strand-split, 15-read revamp (rawmod_full_pipeline4/refeaturize_strand15.py):
 # forward-strand-only pileups, height 16 (15 reads + ref row) instead of 31,
@@ -222,7 +227,7 @@ HP_WGA = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/fea
 # scripts/ground_truth/select_holdout_regions.py) instead of the default,
 # unrestricted pipeline4 features.
 _P4 = os.environ.get('RAWMOD_FEATURES_ROOT',
-                     '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features')
+                     f'{RAWMOD_RESULTS}/rawmod_full_pipeline4/features')
 HP_WT_V2  = f'{_P4}/HP26695_WT_5kHz/features.h5'
 HP_WGA_V2 = f'{_P4}/HP26695_WGA_5kHz/features.h5'
 ONT_FILES_V2 = {
@@ -248,7 +253,7 @@ USE_STRAND15 = os.environ.get('RAWMOD_DATA_GEN', '') in ('strand15', 'strandres'
 # the sequenced strand. See scripts/featurize/refeaturize_strand_resolved.py.
 USE_STRANDRES = os.environ.get('RAWMOD_DATA_GEN', '') == 'strandres'
 _SR = os.environ.get('RAWMOD_STRANDRES_ROOT',
-                     '/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved/features')
+                     f'{RAWMOD_STORE}/rawmod_strand_resolved/features')
 STRANDS = ('+', '-')
 HEIGHT = 16 if USE_STRAND15 else 31   # 1 ref row + (15 or 30) reads
 
@@ -427,7 +432,7 @@ def ref_base_center(group):
 
 
 CHEM_MAP_DIR = os.environ.get(
-    'RAWMOD_CHEM_MAP', '/fs/cbcb-scratch/bds062/data/gt_modkit/chem_map')
+    'RAWMOD_CHEM_MAP', f'{RAWMOD_DATA}/gt_modkit/chem_map')
 _chem_map_cache = {}
 
 

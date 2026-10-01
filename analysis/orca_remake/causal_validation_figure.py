@@ -22,6 +22,11 @@ with ONT scored zero-shot at eval time only) and turns it into a single
 modified-call-rate bar figure. No new inference is run here (eval_umces5.py
 was re-run separately to add the ont_control row).
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS  # noqa: E402  (site paths; see paths.env.example)
+
 import csv
 from pathlib import Path
 
@@ -29,8 +34,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-METRICS_TSV = '/fs/cbcb-scratch/bds062/results/deepmod_umces/results5/eval/metrics.tsv'
-OUT_DIR = Path('/fs/cbcb-scratch/bds062/results/orca_remake/figures')
+METRICS_TSV = f'{RAWMOD_RESULTS}/deepmod_umces/results5/eval/metrics.tsv'
+OUT_DIR = Path(f'{RAWMOD_RESULTS}/orca_remake/figures')
 
 # dataset -> (display label, is_causal_negative)
 # call rate = fraction of sites called "modified" by RawMod:

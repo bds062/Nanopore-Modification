@@ -25,6 +25,11 @@ Public API
   positions_of_type(ref_names, ref_pos, mod_map, mod_type) -> np.ndarray[bool]
 """
 
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, RAWMOD_SHARED  # noqa: E402  (site paths; see paths.env.example)
+
 from pathlib import Path
 
 import numpy as np
@@ -153,14 +158,14 @@ def type_counts(ref_names, ref_pos, labels, mod_map: dict) -> dict:
 if __name__ == '__main__':
     # Smoke/inspection: build the map and print per-type modified counts for bc06/07.
     import h5py
-    REF = '/fs/cbcb-lab/storm/shared/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
+    REF = f'{RAWMOD_SHARED}/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
     PILEUPS = [
-        '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/modbam/barcode06_pileup.bed',
-        '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/modbam/barcode07_pileup.bed',
+        f'{RAWMOD_RESULTS}/deepmod_ont+umces/modbam/barcode06_pileup.bed',
+        f'{RAWMOD_RESULTS}/deepmod_ont+umces/modbam/barcode07_pileup.bed',
     ]
     H5S = [
-        '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/features/barcode06.h5',
-        '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/features/barcode07.h5',
+        f'{RAWMOD_RESULTS}/deepmod_ont+umces/features/barcode06.h5',
+        f'{RAWMOD_RESULTS}/deepmod_ont+umces/features/barcode07.h5',
     ]
     mm = build_umces_mod_map(PILEUPS, REF)
     print(f"mod_map entries: {len(mm):,}")

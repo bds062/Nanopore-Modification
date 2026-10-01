@@ -21,6 +21,11 @@ default, since that's the data every recent results dir trains on.
 
 Usage: python feature_plots_by_modtype.py --out-dir <dir> [--per-group N]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import os
 import sys
 from collections import Counter
@@ -35,7 +40,7 @@ from torch.utils.data import DataLoader
 
 os.environ.setdefault('RAWMOD_DATA_GEN', 'strand15')
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'train', REPO / 'rawmod'):
     sys.path.insert(0, str(_p))

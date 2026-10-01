@@ -307,7 +307,7 @@ matrix, PR curve, training curves, and `test_predictions.npz`. A **ZeroR**
 majority-class baseline is always reported.
 
 ### 8.2 External eval — `eval_umces5.py`
-[eval_umces5.py](/fs/cbcb-scratch/bds062/results/deepmod_umces/eval_umces5.py)
+`eval_umces5.py` (not in this repository)
 scores fully held-out datasets (bc01 PCR control, bc06/07 WGS test files, ONT
 6mA/5mC) at a fixed threshold=0.5, reading `supcon_proj_dim` from the checkpoint
 to rebuild the model. This is the true generalization test.

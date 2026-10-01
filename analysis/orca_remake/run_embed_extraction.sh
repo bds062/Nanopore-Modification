@@ -18,19 +18,20 @@
 #
 # Usage: bash run_embed_extraction.sh
 
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
 
-REPO=/fs/nexus-scratch/bds062/Nanopore-Modification
+REPO=${RAWMOD_REPO}
 SCORE=${REPO}/experiments/pipeline3/score_genome.py
-CKPT=/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/results5/best_model.pt
-OUT=/fs/cbcb-scratch/bds062/results/orca_remake/data/embeddings
-LOGDIR=/fs/cbcb-scratch/bds062/results/orca_remake/logs
-PYTHON_ENV="source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && conda activate /fs/nexus-scratch/bds062/envs/mod"
+CKPT=${RAWMOD_RESULTS}/deepmod_ont+umces/results5/best_model.pt
+OUT=${RAWMOD_RESULTS}/orca_remake/data/embeddings
+LOGDIR=${RAWMOD_RESULTS}/orca_remake/logs
+PYTHON_ENV="source ${CONDA_SH} && conda activate ${RAWMOD_ENV}"
 
 mkdir -p "${OUT}" "${LOGDIR}"
 
-RESULTS9=/fs/nexus-scratch/bds062/results/deep_modification/results9
-UMCES_ONTUM=/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/features
+RESULTS9=${RAWMOD_LEGACY_RESULTS}/deep_modification/results9
+UMCES_ONTUM=${RAWMOD_RESULTS}/deepmod_ont+umces/features
 
 # Exactly the 7 files deepmod_ont+umces/results5/best_model.pt was itself
 # trained on (see its checkpoint 'args'/'input' list) -- barcode_unmod.h5 is

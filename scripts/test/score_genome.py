@@ -20,6 +20,11 @@ stricter reading is wanted, and `--both` scores with both for comparison.
 
 Outputs `<out>/<dataset>_scores.tsv.gz`:  contig, pos, score, label, n_reads
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import gzip
 import os
@@ -45,7 +50,7 @@ for _p in (REPO / 'scripts' / 'train',
 # Trained weights (data artefact, not code) — overridable for portability.
 MODELS = Path(os.environ.get(
     'RAWMOD_MODELS',
-    '/fs/cbcb-scratch/bds062/results/deepmod_full_pipeline2/results2/models'))
+    f'{RAWMOD_RESULTS}/deepmod_full_pipeline2/results2/models'))
 
 CHECKPOINT_FOR = {
     'Ecoli_DM_5kHz':        MODELS / 'lodo_Ecoli_DM_5kHz/lodo/best_model.pt',

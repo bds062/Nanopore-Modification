@@ -21,6 +21,11 @@ Outputs into <out-dir> (default results1/):
 Run collect.py after all three jobs to merge metrics and draw the 4 figures.
 """
 
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_LEGACY_RESULTS, RAWMOD_RESULTS, RAWMOD_SHARED, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import json
 import os
@@ -42,7 +47,7 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score,
 )
 
-RAWMOD_CORE = Path('/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod')
+RAWMOD_CORE = Path(f'{REPO_DIR}/rawmod')
 sys.path.insert(0, str(RAWMOD_CORE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -70,7 +75,7 @@ def _wandb_log(payload: dict) -> None:
             pass
 
 # ── fixed data locations ──────────────────────────────────────────────────────
-RESULTS9 = Path('/fs/nexus-scratch/bds062/results/deep_modification/results9')
+RESULTS9 = Path(f'{RAWMOD_LEGACY_RESULTS}/deep_modification/results9')
 ONT_FILES = {           # modification -> file  (control has no modification)
     '5mC':     str(RESULTS9 / '5mC.h5'),
     '5hmC':    str(RESULTS9 / '5hmC.h5'),
@@ -80,7 +85,7 @@ ONT_FILES = {           # modification -> file  (control has no modification)
 ONT_ORDER = ['5mC', '5hmC', '6mA', 'control']            # deterministic file order
 ONT_LOMO_MODS = ['5mC', '5hmC', '6mA']
 
-UMCES_ROOT   = Path('/fs/cbcb-scratch/bds062/results')
+UMCES_ROOT   = Path(f'{RAWMOD_RESULTS}')
 UMCES_FILES  = {         # role handled per-file in the split builders
     'bc06': str(UMCES_ROOT / 'deepmod_ont+umces/features/barcode06.h5'),
     'bc07': str(UMCES_ROOT / 'deepmod_ont+umces/features/barcode07.h5'),
@@ -95,7 +100,7 @@ UMCES_WGS    = {'bc06', 'bc07'}          # carry modifications; split by region
 UMCES_REGION = (34597, 53675)            # FJ230960.1 barcode01 amplicon (test region)
 UMCES_LOMO_MODS = ['5mC', '5hmC', '6mA', '5hmU']
 
-UMCES_REF = '/fs/cbcb-lab/storm/shared/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
+UMCES_REF = f'{RAWMOD_SHARED}/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
 UMCES_PILEUPS = [
     str(UMCES_ROOT / 'deepmod_ont+umces/modbam/barcode06_pileup.bed'),
     str(UMCES_ROOT / 'deepmod_ont+umces/modbam/barcode07_pileup.bed'),

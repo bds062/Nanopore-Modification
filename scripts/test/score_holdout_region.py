@@ -26,7 +26,7 @@ comparable to the results24/26 tables. --all-negatives skips that and reports
 the (harder, lower-prevalence) full-region number as well.
 
 Usage:
-  RAWMOD_STRANDRES_ROOT=/fs/cbcb-lab/storm/bds062/rawmod_strandres_region_only/features \
+  RAWMOD_STRANDRES_ROOT=$RAWMOD_STORE/rawmod_strandres_region_only/features \
   RAWMOD_DATA_GEN=strandres EXTRA_ORGANISMS=1 INCLUDE_HUMAN=1 SUPCON_DIM=128 \
   SAD_DIM=16 TF_LAYERS=2 \
   python score_holdout_region.py --fold loco_5mC \

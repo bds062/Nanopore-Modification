@@ -15,6 +15,11 @@ apply to them and shouldn't be run on them).
 
 Usage: python embed_background_sites.py --ckpt <best_model.pt> --npz <embeddings_allorg.npz>
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import sys
 from pathlib import Path
@@ -23,7 +28,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'train', REPO / 'rawmod', REPO / 'scripts' / 'test'):
     sys.path.insert(0, str(_p))
@@ -33,7 +38,7 @@ from score_genome import load_model                                    # noqa: E
 
 SEED = 0
 MAX_PER_GROUP = 200
-BG_ROOT = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features/benchmark'
+BG_ROOT = f'{RAWMOD_RESULTS}/rawmod_full_pipeline4/features/benchmark'
 BG_ORGS = ['Anabaena_WT_5kHz', 'Ecoli_DM_5kHz', 'Ecoli_DM_MSssI_5kHz', 'Ecoli_WT_5kHz',
           'Tdenticola_WT_5kHz', 'HPJ99_WT_5kHz']
 

@@ -41,6 +41,11 @@ Outputs:
                                              every panel
   data/annotation_clustering_report.txt  -- GMM cluster ARI/NMI vs type & source
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import gzip
 import sys
 from pathlib import Path
@@ -52,14 +57,14 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 sys.path.insert(0, str(REPO / 'scripts' / 'test'))
 from cluster_types import bic_sweep, evaluate, gmm_cluster  # noqa: E402
 
-EMBED_DIR = Path('/fs/cbcb-scratch/bds062/results/orca_remake/data/embeddings')
-TYPE_DIR = Path('/fs/cbcb-scratch/bds062/results/orca_remake/data/type_labels')
-OUT_FIG = Path('/fs/cbcb-scratch/bds062/results/orca_remake/figures/fig_annotation_embedding.png')
-OUT_REPORT = Path('/fs/cbcb-scratch/bds062/results/orca_remake/data/annotation_clustering_report.txt')
+EMBED_DIR = Path(f'{RAWMOD_RESULTS}/orca_remake/data/embeddings')
+TYPE_DIR = Path(f'{RAWMOD_RESULTS}/orca_remake/data/type_labels')
+OUT_FIG = Path(f'{RAWMOD_RESULTS}/orca_remake/figures/fig_annotation_embedding.png')
+OUT_REPORT = Path(f'{RAWMOD_RESULTS}/orca_remake/data/annotation_clustering_report.txt')
 
 MAX_PER_GROUP = 3000
 SEED = 0

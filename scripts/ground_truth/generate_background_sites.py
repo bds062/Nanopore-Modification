@@ -17,6 +17,11 @@ label to 0, which is exactly what we want here.
 
 Usage: python generate_background_sites.py
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import gzip
 import re
 import sys
@@ -24,8 +29,8 @@ from pathlib import Path
 
 import numpy as np
 
-BENCH_REF = '/fs/cbcb-lab/storm/bds062/data/benchmark/references'
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
+BENCH_REF = f'{RAWMOD_STORE}/data/benchmark/references'
+GT_ROOT = f'{RAWMOD_DATA}/gt'
 SEED = 0
 CAP_PER_ORG = 20000
 

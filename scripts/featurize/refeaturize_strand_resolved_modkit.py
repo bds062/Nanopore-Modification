@@ -18,20 +18,25 @@ real within-library negatives.
 
 Output goes to a separate tree so the motif-based production features are
 untouched:
-  /fs/cbcb-lab/storm/bds062/rawmod_strand_resolved_modkit/features
+  $RAWMOD_STORE/rawmod_strand_resolved_modkit/features
 
 Usage:
   python refeaturize_strand_resolved_modkit.py --dry-run
   python refeaturize_strand_resolved_modkit.py [--only NAME,NAME] [--dependency IDS]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
 import refeaturize_strand_resolved as base
 
-GT_MODKIT = Path('/fs/cbcb-scratch/bds062/data/gt_modkit')
-OUT = Path('/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved_modkit')
+GT_MODKIT = Path(f'{RAWMOD_DATA}/gt_modkit')
+OUT = Path(f'{RAWMOD_STORE}/rawmod_strand_resolved_modkit')
 
 # dataset name -> directory under GT_MODKIT holding gt_/cand_<tag>.bed
 GT_DIR = {name: name for name in (

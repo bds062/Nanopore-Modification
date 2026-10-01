@@ -23,25 +23,30 @@ and to the old forward-only data.
 Everything else (window, L, min-reads, min-mapq, sampling, max-reads 15) is
 reproduced from refeaturize_strand15.py / refeaturize_benchmark.py.
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import CONDA_SH, PYTHON, RAWHASH2_DIR, RAWMOD_DATA, RAWMOD_ENV, RAWMOD_LEGACY_DATA, RAWMOD_LEGACY_RESULTS, RAWMOD_RESULTS, RAWMOD_SHARED, RAWMOD_STORE, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
-PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
-CONDA = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
-         'conda activate /fs/nexus-scratch/bds062/envs/mod')
-OUT = Path('/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved')  # cbcb-scratch is 93% full
-GS = '/fs/cbcb-scratch/bds062/data/gt_strand'
-RAWHASH2_LT = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/extern/'
+PYTHON = f'{PYTHON}'
+FEATURIZE = f'{REPO_DIR}/rawmod/featurization.py'
+CONDA = (f'source {CONDA_SH} && '
+         f'conda activate {RAWMOD_ENV}')
+OUT = Path(f'{RAWMOD_STORE}/rawmod_strand_resolved')  # bulk storage
+GS = f'{RAWMOD_DATA}/gt_strand'
+RAWHASH2_LT = (f'{RAWHASH2_DIR}/extern/'
                'local_kmer_models/uncalled_r1041_model_only_means.txt')
-ONT_LT = '/fs/nexus-scratch/bds062/results/uncalled_r1041_model_only_means.txt'
-UMBC = '/fs/cbcb-lab/storm/shared/umbc-ont-data'
+ONT_LT = f'{RAWMOD_LEGACY_RESULTS}/uncalled_r1041_model_only_means.txt'
+UMBC = f'{RAWMOD_SHARED}/umbc-ont-data'
 BC_POD5 = f'{UMBC}/pod5_by_barcode/run1_jan31/single_end/high_quality'
 BC_BAM = f'{UMBC}/basecalled/run1_jan31/single_end/high_quality'
-BENCH_POD5 = '/fs/cbcb-lab/storm/bds062/data/benchmark'
-HUMAN_POD5 = '/fs/cbcb-scratch/bds062/data/human'
-OLD = '/fs/cbcb-scratch/bds062/results/benchmark_results'
+BENCH_POD5 = f'{RAWMOD_STORE}/data/benchmark'
+HUMAN_POD5 = f'{RAWMOD_DATA}/human'
+OLD = f'{RAWMOD_RESULTS}/benchmark_results'
 
 HP = '--half-window 10 --L 10 --min-reads 12 --min-mapq 30 --uniform-sampling --max-images-per-base 1'
 BC0607 = ('--min-reads 5 --max-images-per-base 5 --min-mapq 30 --normalize '
@@ -82,12 +87,12 @@ for mod in ('control', '5mC', '5hmC', '6mA'):
     # ONT constructs carry the modification at 256 designed positions on the +
     # strand only, so the minus strand of those sites is genuinely unmodified.
     D.append(dict(name=f'ONT_{mod}',
-                  pod5=f'/fs/nexus-scratch/bds062/data/ont-os/subset_{mod}/{mod}_rep1.pod5',
-                  bam=f'/fs/nexus-scratch/bds062/results/event_clustering_{mod}/basecalled/reads_refined.bam',
-                  peaks=f'/fs/nexus-scratch/bds062/results/event_clustering_{mod}/basecalled/peaks_refined.tsv',
+                  pod5=f'{RAWMOD_LEGACY_DATA}/ont-os/subset_{mod}/{mod}_rep1.pod5',
+                  bam=f'{RAWMOD_LEGACY_RESULTS}/event_clustering_{mod}/basecalled/reads_refined.bam',
+                  peaks=f'{RAWMOD_LEGACY_RESULTS}/event_clustering_{mod}/basecalled/peaks_refined.tsv',
                   lt=ONT_LT,
                   gt=(None if mod == 'control' else
-                      f'/fs/nexus-scratch/bds062/data/ont-os/references|all_5mers_{mod}_sites.bed'),
+                      f'{RAWMOD_LEGACY_DATA}/ont-os/references|all_5mers_{mod}_sites.bed'),
                   cand=False, extra=ONTC, mem='32G'))
 for nm, sub, gtd, mem, cap in (
         ('Anabaena_WT_5kHz', f'{BENCH_POD5}/bacteria/Anabaena_WT_5kHz/pod5', 'anabaena', '48G', None),

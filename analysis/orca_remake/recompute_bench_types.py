@@ -26,6 +26,11 @@ Rewrites embeddings_allorg.npz's `types` array in place (backs up the
 original once as embeddings_allorg.orig_types.npy) and regenerates the
 bytype PCA/t-SNE figures.
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, RAWMOD_STORE, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import gzip
 import re
 import sys
@@ -33,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'analysis' / 'orca_remake', REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'train', REPO / 'rawmod', REPO / 'scripts' / 'test'):
     sys.path.insert(0, str(_p))
@@ -46,7 +51,7 @@ os.environ.setdefault('INCLUDE_HUMAN', '1')
 import run_matched_loco as ML                                   # noqa: E402
 from run_matched_loco import R                                  # noqa: E402
 
-BENCH_REF = '/fs/cbcb-lab/storm/bds062/data/benchmark/references'
+BENCH_REF = f'{RAWMOD_STORE}/data/benchmark/references'
 
 # gt_name -> (reference fasta, [(motif_iupac, offset, strand, type), ...])
 TYPED_MOTIFS = {
@@ -139,7 +144,7 @@ def build_type_lookup(gt_name):
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument('--npz', default='/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/'
+    ap.add_argument('--npz', default=f'{RAWMOD_RESULTS}/rawmod_matched_loco/'
                     'results15/embedding_clustering/embeddings_allorg.npz')
     a = ap.parse_args()
     npz_path = Path(a.npz)

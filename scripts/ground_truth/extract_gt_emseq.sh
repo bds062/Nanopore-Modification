@@ -28,26 +28,24 @@
 #   LO_FRAC   — fraction threshold for unmodified (default: 0.10)
 #   THREADS   — number of threads for modkit (default: 16)
 
-#SBATCH --partition=cbcb
-#SBATCH --account=cbcb
-#SBATCH --qos=high
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
-#SBATCH --output=/fs/cbcb-scratch/bds062/logs/extract_gt_%x_%j.out
-#SBATCH --error=/fs/cbcb-scratch/bds062/logs/extract_gt_%x_%j.err
+#SBATCH --output=extract_gt_%x_%j.out
+#SBATCH --error=extract_gt_%x_%j.err
 
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
-mkdir -p /fs/cbcb-scratch/bds062/logs
+mkdir -p ${RAWMOD_SCRATCH}/logs
 
 module load samtools/1.16 2>/dev/null || true
 
-CONDA_BASE=/nfshomes/bds062/miniconda3
+CONDA_BASE=${CONDA_BASE}
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
-conda activate /fs/nexus-scratch/bds062/envs/mod
+conda activate ${RAWMOD_ENV}
 
-MODKIT=/fs/nexus-scratch/bds062/envs/mod/bin/modkit
+MODKIT=${RAWMOD_ENV}/bin/modkit
 
 : "${DATASET:?DATASET env var required}"
 : "${EMSEQ_BAM:?EMSEQ_BAM env var required}"
@@ -65,7 +63,7 @@ GT_MOD="${OUTDIR}/gt_modified.bed"
 CANDIDATE="${OUTDIR}/candidate.bed"
 
 SCRIPTS_DIR="$(dirname "$(realpath "$0")")"
-PYTHON=/fs/nexus-scratch/bds062/envs/mod/bin/python
+PYTHON=${RAWMOD_ENV}/bin/python
 
 echo "================================================================"
 echo " Dataset   : ${DATASET}"

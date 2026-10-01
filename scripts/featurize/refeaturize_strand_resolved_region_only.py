@@ -19,6 +19,11 @@ Usage:
   python refeaturize_strand_resolved_region_only.py --dry-run
   python refeaturize_strand_resolved_region_only.py [--only NAME,NAME] [--dependency IDS]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
@@ -27,7 +32,7 @@ import refeaturize_strand_resolved as base
 import refeaturize_strand_resolved_modkit as mk
 from refeaturize_strand_resolved_holdout import EXCLUDE_BED
 
-OUT = Path('/fs/cbcb-lab/storm/bds062/rawmod_strandres_region_only')
+OUT = Path(f'{RAWMOD_STORE}/rawmod_strandres_region_only')
 
 # Datasets whose labels come from modkit in the merged root; everything else
 # keeps motif labels, exactly as in build_merged_root.sh.

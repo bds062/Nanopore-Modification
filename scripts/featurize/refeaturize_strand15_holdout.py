@@ -7,21 +7,26 @@ rawmod_full_pipeline4/ features used by checkpoints/results20_sad_dim16/ are
 untouched.
 
 Point a training run at this tree with:
-  RAWMOD_FEATURES_ROOT=/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4_holdout/features
+  RAWMOD_FEATURES_ROOT=$RAWMOD_RESULTS/rawmod_full_pipeline4_holdout/features
 
 Usage:
   python refeaturize_strand15_holdout.py --dry-run
   python refeaturize_strand15_holdout.py
   python refeaturize_strand15_holdout.py --only HP26695_WT_5kHz,barcode06
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_RESULTS  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
 import refeaturize_strand15 as base
 
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
-OUT_ROOT = Path('/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4_holdout')
+GT_ROOT = f'{RAWMOD_DATA}/gt'
+OUT_ROOT = Path(f'{RAWMOD_RESULTS}/rawmod_full_pipeline4_holdout')
 
 # dataset name (from refeaturize_strand15.DATASETS) -> holdout BED. HP26695 and
 # SPO1/UMCES/ONT_all5mers each share ONE reference across all their datasets

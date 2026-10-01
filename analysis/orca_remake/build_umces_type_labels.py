@@ -18,26 +18,31 @@ values in {'5mC','5hmC','6mA','5hmU','unmod','untyped'}:
   - label==1, in mod_map          -> the mapped type
   - label==1, not in mod_map      -> 'untyped' (excluded downstream)
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, RAWMOD_SHARED, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import sys
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 sys.path.insert(0, str(REPO / 'scripts' / 'train'))
 from mod_types import build_umces_mod_map, _decode  # noqa: E402
 
-UMCES_REF = '/fs/cbcb-lab/storm/shared/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
+UMCES_REF = f'{RAWMOD_SHARED}/umbc-ont-data/ref/SPO1_FJ230960.1.fasta'
 UMCES_PILEUPS = [
-    '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/modbam/barcode06_pileup.bed',
-    '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/modbam/barcode07_pileup.bed',
+    f'{RAWMOD_RESULTS}/deepmod_ont+umces/modbam/barcode06_pileup.bed',
+    f'{RAWMOD_RESULTS}/deepmod_ont+umces/modbam/barcode07_pileup.bed',
 ]
 H5_FILES = {
-    'SPO1_bc06': '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/features/barcode06.h5',
-    'SPO1_bc07': '/fs/cbcb-scratch/bds062/results/deepmod_ont+umces/features/barcode07.h5',
+    'SPO1_bc06': f'{RAWMOD_RESULTS}/deepmod_ont+umces/features/barcode06.h5',
+    'SPO1_bc07': f'{RAWMOD_RESULTS}/deepmod_ont+umces/features/barcode07.h5',
 }
-OUT_DIR = Path('/fs/cbcb-scratch/bds062/results/orca_remake/data/type_labels')
+OUT_DIR = Path(f'{RAWMOD_RESULTS}/orca_remake/data/type_labels')
 
 
 def main():

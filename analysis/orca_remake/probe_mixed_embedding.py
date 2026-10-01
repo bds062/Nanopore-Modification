@@ -29,6 +29,11 @@ of any probe.
 
 Usage: python probe_mixed_embedding.py [--ckpt-dir results6]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import sys
 from pathlib import Path
@@ -37,7 +42,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'test',
            REPO / 'scripts' / 'train',
@@ -53,7 +58,7 @@ from sklearn.neighbors import KNeighborsClassifier                # noqa: E402
 from sklearn.preprocessing import StandardScaler                  # noqa: E402
 from sklearn.metrics import roc_auc_score                         # noqa: E402
 
-RESULTS_BASE = Path('/fs/cbcb-scratch/bds062/results/rawmod_matched_loco')
+RESULTS_BASE = Path(f'{RAWMOD_RESULTS}/rawmod_matched_loco')
 SEED = 0
 MAX_TRAIN_PROBE = 60_000   # cap for probe-fitting speed; test split used in full
 

@@ -18,6 +18,7 @@
 # so the size-4 anchor point is directly comparable to the new size-2/3 points.
 #
 # Usage (login node): bash run_chem_diversity_sweep.sh [--dry-run]
+set -a; source "${RAWMOD_PATHS_FILE:-$HOME/.config/rawmod/paths.env}" 2>/dev/null || true; set +a   # site paths; see paths.env.example
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +39,7 @@ echo "20 new subset folds:"
 echo "  ${FOLDS}" | tr ' ' '\n' | sed 's/^/    /'
 
 FOLDS="${FOLDS}" \
-OUTDIR=/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results18_chem_diversity \
+OUTDIR=${RAWMOD_RESULTS}/rawmod_matched_loco/results18_chem_diversity \
 RAWMOD_DATA_GEN=strand15 \
 EXTRA_ORGANISMS=1 \
 INCLUDE_HUMAN=1 \

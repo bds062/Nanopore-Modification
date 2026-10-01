@@ -39,11 +39,16 @@ run_matched_loco.chem_array().
 Usage:
   python build_modkit_chem_map.py [--out DIR] [--pos-pct 80] [--min-cov 10]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import os
 from pathlib import Path
 
-GT = Path('/fs/cbcb-scratch/bds062/data/gt_modkit')
+GT = Path(f'{RAWMOD_DATA}/gt_modkit')
 
 # Which C marks each organism is documented to carry. A mark absent here is
 # treated as a model artefact no matter how confidently it is called.

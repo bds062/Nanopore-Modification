@@ -36,6 +36,11 @@ Outputs (under results4/embedding_clustering_per_fold/):
                                             chemistry, colored by type, that
                                             chemistry starred/highlighted
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import io
 import sys
 from collections import Counter
@@ -47,7 +52,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-REPO = Path('/fs/nexus-scratch/bds062/Nanopore-Modification')
+REPO = Path(f'{REPO_DIR}')
 for _p in (REPO / 'analysis' / 'orca_remake',
            REPO / 'scripts' / 'train',
            REPO / 'scripts' / 'test',
@@ -65,8 +70,8 @@ from sklearn.decomposition import PCA                              # noqa: E402
 from sklearn.manifold import TSNE                                  # noqa: E402
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score  # noqa: E402
 
-RESULTS5 = Path('/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results5')
-OUT = Path('/fs/cbcb-scratch/bds062/results/rawmod_matched_loco/results4/'
+RESULTS5 = Path(f'{RAWMOD_RESULTS}/rawmod_matched_loco/results5')
+OUT = Path(f'{RAWMOD_RESULTS}/rawmod_matched_loco/results4/'
            'embedding_clustering_per_fold')
 SEED = 0
 CHEMS = ('5mC', '5hmC', '6mA', '4mC', '5hmU')

@@ -22,6 +22,11 @@ Usage:
   python refeaturize_strand_resolved_modkit_holdout.py --dry-run
   python refeaturize_strand_resolved_modkit_holdout.py [--dependency IDS]
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_STORE  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
@@ -30,7 +35,7 @@ import refeaturize_strand_resolved as base
 import refeaturize_strand_resolved_modkit as mk
 from refeaturize_strand_resolved_holdout import EXCLUDE_BED
 
-OUT = Path('/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved_modkit_holdout')
+OUT = Path(f'{RAWMOD_STORE}/rawmod_strand_resolved_modkit_holdout')
 
 # Only the datasets that actually have modkit ground truth featurized; the rest
 # are reused from the motif holdout tree, unchanged.

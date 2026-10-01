@@ -43,6 +43,11 @@ Usage:
   python select_holdout_regions.py --dry-run
   python select_holdout_regions.py
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_DATA, RAWMOD_LEGACY_RESULTS, RAWMOD_RESULTS, RAWMOD_SHARED  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import hashlib
 from pathlib import Path
@@ -50,11 +55,11 @@ from pathlib import Path
 import numpy as np
 import pysam
 
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
-BENCH = '/fs/cbcb-scratch/bds062/results/benchmark_results'
-UMBC_BAM = ('/fs/cbcb-lab/storm/shared/umbc-ont-data/basecalled/'
+GT_ROOT = f'{RAWMOD_DATA}/gt'
+BENCH = f'{RAWMOD_RESULTS}/benchmark_results'
+UMBC_BAM = (f'{RAWMOD_SHARED}/umbc-ont-data/basecalled/'
            'run1_jan31/single_end/high_quality')
-EVENT = '/fs/nexus-scratch/bds062/results'
+EVENT = f'{RAWMOD_LEGACY_RESULTS}'
 
 TARGET_FRAC = 0.15
 MIN_MINOR_FRAC = 0.05       # floor for policy 2 (hold out minor contigs as-is)

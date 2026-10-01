@@ -12,21 +12,26 @@ Usage:
   python featurize_background.py --dry-run
   python featurize_background.py
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import CONDA_SH, PYTHON, RAWHASH2_DIR, RAWMOD_DATA, RAWMOD_ENV, RAWMOD_RESULTS, RAWMOD_STORE, REPO_DIR  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
 
-PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
-FEATURIZE = '/fs/nexus-scratch/bds062/Nanopore-Modification/rawmod/featurization.py'
-CONDA_INIT = ('source /nfshomes/bds062/miniconda3/etc/profile.d/conda.sh && '
-             'conda activate /fs/nexus-scratch/bds062/envs/mod')
+PYTHON = f'{PYTHON}'
+FEATURIZE = f'{REPO_DIR}/rawmod/featurization.py'
+CONDA_INIT = (f'source {CONDA_SH} && '
+             f'conda activate {RAWMOD_ENV}')
 
-POD5_ROOT = '/fs/cbcb-lab/storm/bds062/data/benchmark'
-OLD_RESULTS = '/fs/cbcb-scratch/bds062/results/benchmark_results'
-GT_ROOT = '/fs/cbcb-scratch/bds062/data/gt'
-LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/extern/'
+POD5_ROOT = f'{RAWMOD_STORE}/data/benchmark'
+OLD_RESULTS = f'{RAWMOD_RESULTS}/benchmark_results'
+GT_ROOT = f'{RAWMOD_DATA}/gt'
+LEVEL_TABLE = (f'{RAWHASH2_DIR}/extern/'
               'local_kmer_models/uncalled_r1041_model_only_means.txt')
-OUT_ROOT = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features/benchmark'
+OUT_ROOT = f'{RAWMOD_RESULTS}/rawmod_full_pipeline4/features/benchmark'
 
 COMMON = ('--half-window 10 --L 10 --max-reads 15 --min-mapq 0 '
          '--strand + --uniform-sampling --max-images-per-base 1')

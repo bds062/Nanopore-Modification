@@ -12,13 +12,18 @@ table is needed (contrast refeaturize_strand15_holdout.py, where three
 datasets have no data/gt/ directory at all).
 
 Point a training run at this tree with:
-  RAWMOD_FEATURES_ROOT=/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4_holdout/features
+  RAWMOD_FEATURES_ROOT=$RAWMOD_RESULTS/rawmod_full_pipeline4_holdout/features
 
 Usage:
   python refeaturize_benchmark_holdout.py --dry-run
   python refeaturize_benchmark_holdout.py
   python refeaturize_benchmark_holdout.py --only Anabaena_WT_5kHz,hg001
 """
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from rawmod.paths import RAWMOD_RESULTS  # noqa: E402  (site paths; see paths.env.example)
+
 import argparse
 import subprocess
 from pathlib import Path
@@ -26,7 +31,7 @@ from pathlib import Path
 import refeaturize_benchmark as base
 
 GT_ROOT = base.GT_ROOT
-OUT_ROOT = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4_holdout/features/benchmark'
+OUT_ROOT = f'{RAWMOD_RESULTS}/rawmod_full_pipeline4_holdout/features/benchmark'
 
 
 def build_cmd(name, pod5_root, pod5_sub, gt_name, min_reads, sample_n_sites):
