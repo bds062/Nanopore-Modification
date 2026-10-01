@@ -42,6 +42,7 @@ Usage:
   python run_convformer_v2.py --model {ont_only|umces_only|both} [--out-dir results6] [--epochs N]
 """
 
+import os
 import argparse
 from pathlib import Path
 
@@ -159,17 +160,27 @@ class ConvFormerV2(nn.Module):
     def __init__(self, in_ch=IN_CH, h=H, w=W, d_model=D_MODEL, nhead=4,
                  layers=2, dim_ff=192, dropout=0.4,
                  dann_lambda=0.0, dann_flank=4, window_positions=21,
-                 supcon_dim=0, sad_dim=0, org_adv_classes=0, org_adv_lambda=1.0):
+                 supcon_dim=0, sad_dim=0, org_adv_classes=0, org_adv_lambda=1.0,
+                 row_emb=True):
         super().__init__()
         self.read_encoder = ReadConvEncoderV2(in_ch, d_model)
-        self.pos = nn.Parameter(torch.zeros(1, h, d_model))
-        enc = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_ff, dropout,
-            activation='gelu', batch_first=True, norm_first=True)
-        self.encoder = nn.TransformerEncoder(enc, layers)
+        # Architecture ablations (defaults = the published model):
+        #   layers=0     no cross-read Transformer -- read tokens are mean-pooled directly
+        #   row_emb=False no learned row embedding -- the read set is order-invariant
+        if row_emb:
+            self.pos = nn.Parameter(torch.zeros(1, h, d_model))
+            nn.init.trunc_normal_(self.pos, std=0.02)
+        else:
+            self.register_buffer('pos', torch.zeros(1, h, d_model))
+        if layers > 0:
+            enc = nn.TransformerEncoderLayer(
+                d_model, nhead, dim_ff, dropout,
+                activation='gelu', batch_first=True, norm_first=True)
+            self.encoder = nn.TransformerEncoder(enc, layers)
+        else:
+            self.encoder = None
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(d_model, 1))
-        nn.init.trunc_normal_(self.pos, std=0.02)
 
         # --- supervised-contrastive projection head ---
         self.supcon_dim = int(supcon_dim)
@@ -217,6 +228,60 @@ class ConvFormerV2(nn.Module):
         self.org_adv_head = (nn.Linear(d_model, self.org_adv_classes)
                              if self.org_adv_classes > 0 else None)
 
+        # --- signal->base auxiliary head (Rockfish) ---
+        self.aux_base_w = float(os.environ.get('AUX_BASE_WEIGHT', '0'))
+        self.aux_base_mask_p = float(os.environ.get('AUX_BASE_MASK_P', '0.15'))
+        self.aux_base_flip_p = float(os.environ.get('AUX_BASE_FLIP_P', '0.05'))
+        self.aux_base_mask_center = os.environ.get('AUX_BASE_MASK_CENTER', '0') == '1'
+        self.aux_base_head = (nn.Sequential(
+            nn.Linear(d_model, 128), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(128, self.Wp * 4)) if self.aux_base_w > 0 else None)
+
+    def _aux_base_mask(self, x):
+        """Rockfish-style signal->base auxiliary task.
+
+        Blank the base one-hots (ch 2-5) at a random subset of WINDOW POSITIONS
+        across every row, flip a further subset to a wrong base, then ask a head
+        to recover the true reference base there. The answer is no longer in the
+        input, so the only route to it is raw signal and dwell -- the model must
+        build a signal->nucleotide mapping.
+
+        Why this rather than PILEUP_MASK_BASES: blanking the base channels
+        outright (our best 5hmU result, 0.481 -> 0.572) DELETES the information.
+        This keeps it and makes the model derive it, which is the representation
+        that should carry to a base never seen modified. Flipped positions teach
+        signal-over-sequence precedence -- the stated base disagrees with the
+        signal, and the signal is right.
+
+        Returns (x_masked, targets (B,Wp), loss_mask (B,Wp)).
+        """
+        B = x.shape[0]
+        L = x.shape[3] // self.Wp
+        ref = x[:, 2:6, 0, :].view(B, 4, self.Wp, L).mean(dim=3)   # (B,4,Wp)
+        tgt = ref.argmax(dim=1)                                    # (B,Wp)
+        has_base = ref.sum(dim=1) > 0.05
+
+        r = torch.rand(B, self.Wp, device=x.device)
+        sel = (r < self.aux_base_mask_p) & has_base
+        flip = ((r >= self.aux_base_mask_p)
+                & (r < self.aux_base_mask_p + self.aux_base_flip_p) & has_base)
+        if not self.aux_base_mask_center:
+            c = self.Wp // 2
+            sel[:, c] = False
+            flip[:, c] = False
+
+        x = x.clone()
+        touched = (sel | flip).view(B, self.Wp, 1).expand(B, self.Wp, L).reshape(B, 1, 1, -1)
+        x[:, 2:6] = x[:, 2:6] * (~touched).to(x.dtype)
+        if bool(flip.any()):
+            wrong = (tgt + torch.randint(1, 4, tgt.shape, device=x.device)) % 4
+            oh = F.one_hot(wrong, 4).to(x.dtype).permute(0, 2, 1).unsqueeze(2)
+            oh = oh.repeat_interleave(L, dim=3)                    # (B,4,1,W)
+            fc = flip.view(B, self.Wp, 1).expand(B, self.Wp, L).reshape(B, 1, 1, -1)
+            x[:, 2:6] = torch.where(fc.expand(-1, 4, x.shape[2], -1),
+                                    oh.expand(-1, -1, x.shape[2], -1), x[:, 2:6])
+        return x, tgt, (sel | flip)
+
     def _flank_targets(self, x):
         """Per-flank-position reference base index (0-3) + validity, from row 0."""
         B = x.shape[0]
@@ -230,13 +295,17 @@ class ConvFormerV2(nn.Module):
 
     def forward(self, x):                        # (B, C, H, W)
         B, C, Hh, Ww = x.shape
+        aux_base = None
+        if self.training and self.aux_base_head is not None:
+            x, ab_tgt, ab_mask = self._aux_base_mask(x)
+            aux_base = (ab_tgt, ab_mask)
         pad = x[:, 0].abs().sum(dim=2) < 1e-6     # (B, H); reference row never masked
         pad[:, 0] = False
 
         reads = x.permute(0, 2, 1, 3).reshape(B * Hh, C, Ww)
         emb = self.read_encoder(reads).view(B, Hh, -1) + self.pos
 
-        enc = self.encoder(emb, src_key_padding_mask=pad)
+        enc = self.encoder(emb, src_key_padding_mask=pad) if self.encoder is not None else emb
         keep = (~pad).unsqueeze(-1).float()
         pooled = (enc * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1.0)
         rep = self.norm(pooled)
@@ -249,8 +318,16 @@ class ConvFormerV2(nn.Module):
 
         if self.training and (self.dann_lambda > 0 or self.proj is not None
                               or self.sad_head is not None
-                              or self.org_adv_head is not None):
+                              or self.org_adv_head is not None
+                              or self.aux_base_head is not None):
             aux = {}
+            if aux_base is not None:
+                ab_tgt, ab_mask = aux_base
+                bl = self.aux_base_head(rep).view(B, self.Wp, 4)
+                ce = F.cross_entropy(bl.reshape(-1, 4), ab_tgt.reshape(-1),
+                                     reduction='none').view(B, self.Wp)
+                aux['aux_base_loss'] = self.aux_base_w * (
+                    (ce * ab_mask.float()).sum() / ab_mask.float().sum().clamp(min=1.0))
             if self.dann_lambda > 0:
                 tgt, valid = self._flank_targets(x)              # (B,F)
                 adv_logits = self.adv(grad_reverse(rep, self.dann_lambda))
@@ -332,7 +409,7 @@ class ConvFormerV2DANN(nn.Module):
         reads = x.permute(0, 2, 1, 3).reshape(B * Hh, C, Ww)
         emb = self.read_encoder(reads).view(B, Hh, -1) + self.pos
 
-        enc = self.encoder(emb, src_key_padding_mask=pad)
+        enc = self.encoder(emb, src_key_padding_mask=pad) if self.encoder is not None else emb
         keep = (~pad).unsqueeze(-1).float()
         pooled = (enc * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1.0)
         rep = self.norm(pooled)

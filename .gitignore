@@ -62,3 +62,8 @@ logs/
 # wandb run dirs
 wandb/
 **/wandb/
+
+# Local edit backups
+*.bak
+*.bak_*
+*.pre_*

@@ -19,9 +19,17 @@ Supported presets (--preset flag):
 Custom motifs can be specified with --motif (IUPAC regex) and --mod-base.
 
 Output:
-  gt_modified.bed   — tab: ref_name, 0-based position of the modified base
-  candidate.bed     — same as gt_modified.bed (all occurrences are modified;
-                      complement / unmodified strand positions are excluded)
+  gt_modified.bed        — tab: ref_name, 0-based position of the modified base
+  candidate.bed          — same as gt_modified.bed
+  gt_modified_plus.bed   — sites whose modified base is on the + strand
+  gt_modified_minus.bed  — sites whose modified base is on the - strand, at the
+                           COMPLEMENTARY + strand coordinate (so a minus-strand
+                           6mA in GATC is listed at the reference T)
+
+  gt_modified.bed pools both strands into one coordinate list, which is only
+  correct for duplex-agnostic labelling.  Nanopore reads one strand at a time,
+  so a minus-strand modification does not alter the current of a forward read;
+  strand-resolved training must use the _plus / _minus files.
 
 Usage:
   python motif_gt.py --ref REF.fa.gz --preset ecoli_dam \\
@@ -68,30 +76,35 @@ _PRESETS = {
     #   HpyIM    m4C at GCATG position 1
     #   HpyIIM   m6A at CTTCAAG position 6
     #   HpyIIIM  m4C at TCTTC position 3 (and complement GAAGA pos 1)
+    # Offsets below were verified empirically against the matched WT-vs-WGA pair
+    # (scripts/ground_truth/hp_offset_scan.py): the modified base is the offset
+    # whose read-median current shifts, allowing for the +2-base downstream
+    # displacement that 4mC shows in this pore chemistry.
+    #   GCATG  offset 1 (C): z = +77 (+ strand) / +68 (- strand)  -> kept
+    #   TCTTC  offset 1 (C): z = +25 (+ strand); - strand weak     -> kept, + only
+    #   CTTCAAG            : no offset above |z| = 2.7 on either strand -> DROPPED
+    # The previous offsets (CTTCAAG 6 = G, TCTTC 3 = T) pointed at bases the
+    # chemistry forbids; TCTTC 3 is where the *signal* peaks, two bases
+    # downstream of the actual 4mC.
     'hpylori_26695': [
-        ('GCATG',   1, '+'),    # HpyIM  m4C
-        ('CATGC',   0, '+'),    # HpyIM  m4C complement strand
-        ('CTTCAAG', 6, '+'),    # HpyIIM 6mA
-        ('CTTTGAAG', 7, '+'),   # HpyIIM 6mA complement (note: palindrome variant)
-        ('TCTTC',   3, '+'),    # HpyIIIM m4C
-        ('GAAGA',   1, '+'),    # HpyIIIM complement
+        ('GCATG',   1, 'both'),    # HpyIM  4mC
+        ('TCTTC',   1, '+'),       # 4mC, plus strand
     ],
 
     # H. pylori J99 restriction-modification systems (REBASE):
     #   HpyAIII  m6A at GTNNNNNNAC  (non-palindromic N6-methyl)
     #   HpyAIV   m4C at TCNNNNNNNGC
     'hpylori_j99': [
-        ('GTNNNNNNAC', 1, '+'),  # HpyAIII 6mA
-        ('TCNNNNNNNGC', 1, '+'), # HpyAIV  4mC
+        ('GTNNNNNNAC', 8, 'both'),   # HpyAIII 6mA (offset 1 was a T; the only A is 8)
+        ('TCNNNNNNNGC', 1, 'both'),  # HpyAIV  4mC
     ],
 
     # T. denticola ATCC35405 (REBASE):
     #   TdeI  m6A at TATAC  position 1 (approx)
     #   Dam   m6A at GATC
     'tdenticola': [
-        ('GATC', 1, 'both'),    # Dam-like 6mA
-        ('TATAC', 1, '+'),      # TdeI 6mA (tentative)
-        ('GTATA', 3, '+'),      # TdeI complement
+        ('GATC', 1, 'both'),     # Dam-like 6mA
+        ('TATAC', 1, 'both'),    # TdeI 6mA (tentative)
     ],
 }
 
@@ -158,6 +171,8 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     gt_path   = os.path.join(args.outdir, 'gt_modified.bed')
     cand_path = os.path.join(args.outdir, 'candidate.bed')
+    plus_path  = os.path.join(args.outdir, 'gt_modified_plus.bed')
+    minus_path = os.path.join(args.outdir, 'gt_modified_minus.bed')
 
     if args.preset:
         motif_list = _PRESETS[args.preset]
@@ -175,11 +190,15 @@ def main():
         print(f"  motif={motif}  offset={offset}  strand={strand}", file=sys.stderr)
 
     n_written = 0
-    seen = set()  # deduplicate (chrom, pos) across motifs / strands
+    n_strand = {'+': 0, '-': 0}
+    seen = set()         # deduplicate (chrom, pos) across motifs / strands
+    seen_str = set()     # deduplicate (chrom, pos, strand)
 
     with open_fasta(args.ref) as fh, \
          open(gt_path, 'w') as fgt, \
-         open(cand_path, 'w') as fcand:
+         open(cand_path, 'w') as fcand, \
+         open(plus_path, 'w') as fplus, \
+         open(minus_path, 'w') as fminus:
 
         chrom = None
         seq_parts = []
@@ -193,11 +212,16 @@ def main():
                 rx = iupac_to_regex(motif_str)
                 for c, pos, s in find_motif_positions(seq, rx, offset, strand,
                                                       chrom, 0):
+                    line = f"{c}\t{pos}\n"
+                    skey = (c, pos, s)
+                    if skey not in seen_str:
+                        seen_str.add(skey)
+                        (fplus if s == '+' else fminus).write(line)
+                        n_strand[s] += 1
                     key = (c, pos)
                     if key in seen:
                         continue
                     seen.add(key)
-                    line = f"{c}\t{pos}\n"
                     fgt.write(line)
                     fcand.write(line)
                     n_written += 1
@@ -208,7 +232,8 @@ def main():
                 flush_chrom()
                 chrom = line[1:].split()[0]
                 seq_parts = []
-                seen.clear()  # positions are per-chromosome
+                seen.clear()      # positions are per-chromosome
+                seen_str.clear()
             else:
                 seq_parts.append(line)
 
@@ -217,6 +242,9 @@ def main():
     print(f"\nModified positions written: {n_written:,}", file=sys.stderr)
     print(f"  gt_modified.bed  → {gt_path}", file=sys.stderr)
     print(f"  candidate.bed    → {cand_path}", file=sys.stderr)
+    print(f"Strand-resolved: + {n_strand['+']:,}  - {n_strand['-']:,}", file=sys.stderr)
+    print(f"  gt_modified_plus.bed   → {plus_path}", file=sys.stderr)
+    print(f"  gt_modified_minus.bed  → {minus_path}", file=sys.stderr)
 
 
 if __name__ == '__main__':

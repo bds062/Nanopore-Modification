@@ -89,7 +89,13 @@ def load_model(ckpt, device):
         proj_dim = int(sd['proj.net.2.weight'].shape[0]) if has_proj else 0
         sad_dim = int(sd['sad_head.weight'].shape[0]) if has_sad else 0
         height = int(sd['pos'].shape[1])
-        model = ConvFormerV2(dropout=0.0,
+        # in_channels is saved by run_pipeline.py; fall back to the stem conv's
+        # weight shape for older checkpoints that predate that field (e.g. the
+        # RAWMOD_DROP_CH9 ablation's 10-channel models need this to not silently
+        # default to IN_CH=11 and crash on load_state_dict).
+        in_ch = int(raw['in_channels']) if isinstance(raw, dict) and raw.get('in_channels') \
+            else int(sd['read_encoder.stem.0.0.weight'].shape[1])
+        model = ConvFormerV2(dropout=0.0, in_ch=in_ch,
                              dann_lambda=1.0 if has_adv else 0.0,  # value irrelevant at eval
                              supcon_dim=proj_dim, sad_dim=sad_dim, h=height)
         model.load_state_dict(sd)
@@ -101,7 +107,7 @@ def load_model(ckpt, device):
             aux.append(f'SupCon proj dim={proj_dim}')
         if has_sad:
             aux.append(f'DeepSAD dim={sad_dim}')
-        print(f"  checkpoint: {' + '.join(aux)} present  h={height} "
+        print(f"  checkpoint: {' + '.join(aux)} present  h={height} in_ch={in_ch} "
               f"epoch={raw.get('epoch')} val_auprc={raw.get('val_auprc')}", flush=True)
         return model, 'convformer_v2'
 
@@ -128,7 +134,10 @@ def score(h5_path, ckpt, device, batch=512, workers=8, want_embed=False,
     ds = PileupDataset([str(h5_path)], np.arange(n, dtype=np.int64), [n],
                        augment=False, seed=0, signal_noise_std=0.0,
                        delta_channels=True, preload=False,
-                       legacy_ch9_center=legacy_ch9)
+                       legacy_ch9_center=legacy_ch9,
+                       # PILEUP_MASK_BASES=1 for checkpoints trained with base
+                       # identity blanked (e.g. results72_B); default off.
+                       mask_all_bases=os.environ.get('PILEUP_MASK_BASES', '0') == '1')
     from torch.utils.data import DataLoader
     from model import make_loader_kwargs, _worker_init_fn
     try:

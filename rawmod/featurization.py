@@ -176,7 +176,74 @@ def load_gt(path: str) -> set:
     return gt_set
 
 
+def load_exclude_bed(path: str) -> dict:
+    """Load a genomic-holdout BED (chrom, start, end; 0-based half-open,
+    standard BED convention -- distinct from the single-position (ref_name,
+    ref_pos) format --gt/--candidate-bed use). Returns {ref_name: [(start,
+    end), ...]}, used to (a) drop candidate/gt positions inside a held-out
+    interval and (b) reject any read whose alignment overlaps one at all, so
+    training never sees a read from the held-out region even at a
+    neighboring, non-excluded position. See scripts/ground_truth/
+    select_holdout_regions.py.
+    """
+    excl = collections.defaultdict(list)
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('track'):
+                continue
+            parts = line.split('\t')
+            excl[parts[0]].append((int(parts[1]), int(parts[2])))
+    return dict(excl)
+
+
+def in_excluded_region(ref_name: str, pos: int, excl_map: dict) -> bool:
+    return any(start <= pos < end for start, end in excl_map.get(ref_name, ()))
+
+
+def read_overlaps_excluded(ref_name: str, ref_start: int, ref_end: int,
+                           excl_map: dict) -> bool:
+    """ref_end is exclusive (pysam's reference_end convention already is)."""
+    return any(ref_start < end and start < ref_end
+              for start, end in excl_map.get(ref_name, ()))
+
+
 _COMP = str.maketrans('ACGT', 'TGCA')
+_COMP_MAP = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'N': 'N'}
+
+
+def mirror_image(tensor):
+    """Reverse the column axis and complement the one-hot base channels."""
+    m = tensor[:, ::-1, :].copy()
+    m[..., [2, 3, 4, 5]] = m[..., [5, 4, 3, 2]]
+    return m
+
+
+def reference_row_revcomp(center_pos, half_window, L, ref_base_map,
+                          kmer_levels, kmer_size, center_idx):
+    """Reference row for a mirrored (read-orientation) minus-strand image.
+
+    The pore's k-mer runs along the read, so for a reverse-mapped read the
+    + strand window is [rpos-(k-1-center_idx), +k) reverse-complemented.
+    """
+    W = 2 * half_window + 1
+    row = np.zeros((W * L, N_CHANNELS), dtype=np.float32)
+    off = kmer_size - 1 - center_idx
+    for w_idx, rpos in enumerate(range(center_pos - half_window,
+                                       center_pos + half_window + 1)):
+        cs, ce = w_idx * L, w_idx * L + L
+        base = _COMP_MAP.get(ref_base_map.get(rpos, 'N').upper(), 'N')
+        if kmer_levels is not None and base != 'N':
+            kmer = ''.join(ref_base_map.get(rpos - off + j, 'N').upper()
+                           for j in range(kmer_size))
+            if 'N' not in kmer:
+                rc = kmer.translate(_COMP)[::-1]
+                if rc in kmer_levels:
+                    row[cs:ce, 0] = np.float32(kmer_levels[rc])
+        oh = BASE_ONEHOT.get(base, (0, 0, 0, 0))
+        row[cs:ce, 2] = oh[0]; row[cs:ce, 3] = oh[1]
+        row[cs:ce, 4] = oh[2]; row[cs:ce, 5] = oh[3]
+    return row[::-1].copy()
 
 
 def _revcomp(seq: str) -> str:
@@ -685,6 +752,32 @@ def main():
                              'Use this for biological datasets to avoid mislabeling '
                              'ambiguous/unobserved sites as negative. (default: all '
                              'eligible positions are emitted)')
+    parser.add_argument('--exclude-bed', default=None,
+                        help='BED file (chrom, start, end; 0-based half-open) of '
+                             'genomic regions to hold out entirely: candidate/gt '
+                             'positions inside them are dropped, and any read '
+                             'whose alignment overlaps them at all is skipped, '
+                             'so no training data comes from these regions -- '
+                             'see scripts/ground_truth/select_holdout_regions.py.')
+    parser.add_argument('--include-bed', default=None,
+                        help='Inverse of --exclude-bed, same BED format: keep '
+                             'ONLY candidate/gt positions INSIDE these regions. '
+                             'Reads are NOT filtered -- every read covering an '
+                             'in-region position is used, which is the point: '
+                             'this featurizes the very region a --exclude-bed '
+                             'training tree held out, so a checkpoint from that '
+                             'tree can be scored on genome it provably never saw.')
+    parser.add_argument('--orient', choices=['ref', 'read'], default='ref',
+                        help="Column/base orientation of the written image. 'ref' "
+                             "(default, legacy) lays every read out along the + "
+                             "strand. 'read' mirrors the image into the sequenced "
+                             "read's own 5'->3' direction: columns reversed, base "
+                             "channels complemented, and the reference row's "
+                             "expected level taken from the reverse-complement "
+                             "k-mer. Requires --strand - ; a minus-strand pileup "
+                             "written with --orient ref does not match what the "
+                             "pore measured (the k-mer in the pore is the reverse "
+                             "complement, read in the opposite direction).")
     parser.add_argument('--strand', choices=['both', '+', '-'], default='both',
                         help="Restrict to reads aligned to this strand only ('+' = "
                              "forward, '-' = reverse). Raw nanopore signal is strand-"
@@ -702,6 +795,9 @@ def main():
         if max_retained_reads_per_pos < args.min_reads:
             parser.error('--max-reads * --max-images-per-base must be >= --min-reads')
 
+    if args.orient == 'read' and args.strand != '-':
+        parser.error("--orient read is only valid with --strand - "
+                     "(forward reads are already in read orientation)")
     target_bases = parse_target_bases(args.target_base, args.target_bases)
     if target_bases:
         print(f"Target reference bases retained during collection: "
@@ -725,6 +821,26 @@ def main():
         seg_borders = load_moves_file(args.moves)
     print(f"  {len(seg_borders):,} segmented reads", file=sys.stderr)
 
+    exclude_map = {}
+    if args.exclude_bed:
+        exclude_map = load_exclude_bed(args.exclude_bed)
+        n_excl_intervals = sum(len(v) for v in exclude_map.values())
+        n_excl_bp = sum(e - s for v in exclude_map.values() for s, e in v)
+        print(f"Genomic holdout: {n_excl_intervals} region(s) from "
+              f"{args.exclude_bed} ({n_excl_bp:,} bp) -- positions inside them "
+              f"are dropped and reads overlapping them are skipped entirely",
+              file=sys.stderr)
+
+    include_map = {}
+    if args.include_bed:
+        if args.exclude_bed:
+            raise SystemExit('--include-bed and --exclude-bed are mutually exclusive')
+        include_map = load_exclude_bed(args.include_bed)
+        n_inc_bp = sum(e - s for v in include_map.values() for s, e in v)
+        print(f"Region-only mode: keeping only positions inside "
+              f"{args.include_bed} ({n_inc_bp:,} bp); reads are not filtered",
+              file=sys.stderr)
+
     gt_set = None
     if args.gt is None:
         print("No --gt supplied; all labels will be 0 (inference mode).",
@@ -737,6 +853,14 @@ def main():
         gt_set = load_gt(args.gt)
         print(f"Ground truth: {len(gt_set):,} modified positions from {args.gt}",
               file=sys.stderr)
+        if exclude_map:
+            gt_set = {(r, p) for r, p in gt_set if not in_excluded_region(r, p, exclude_map)}
+            print(f"  {len(gt_set):,} remain after removing the genomic holdout",
+                  file=sys.stderr)
+        if include_map:
+            gt_set = {(r, p) for r, p in gt_set if in_excluded_region(r, p, include_map)}
+            print(f"  {len(gt_set):,} remain inside the holdout region",
+                  file=sys.stderr)
 
     # Load (and, if huge, pre-sample) the candidate set BEFORE pass 1 so pass 1
     # can skip storing read records for positions we'll never emit. Without
@@ -753,6 +877,16 @@ def main():
         candidate_set = load_gt(args.candidate_bed)
         print(f"Candidate sites: {len(candidate_set):,} from {args.candidate_bed}",
               file=sys.stderr)
+        if exclude_map:
+            candidate_set = {(r, p) for r, p in candidate_set
+                             if not in_excluded_region(r, p, exclude_map)}
+            print(f"  {len(candidate_set):,} remain after removing the genomic holdout",
+                  file=sys.stderr)
+        if include_map:
+            candidate_set = {(r, p) for r, p in candidate_set
+                             if in_excluded_region(r, p, include_map)}
+            print(f"  {len(candidate_set):,} remain inside the holdout region",
+                  file=sys.stderr)
         if args.sample_n_sites is not None:
             presample_cap = args.sample_n_sites * 3  # margin for pass-2 coverage dropout
             if len(candidate_set) > presample_cap:
@@ -796,6 +930,10 @@ def main():
                     continue
                 if bam_read.mapping_quality < args.min_mapq:
                     continue
+                if exclude_map and read_overlaps_excluded(
+                        bam_read.reference_name, bam_read.reference_start,
+                        bam_read.reference_end, exclude_map):
+                    continue
                 read_id = bam_read.query_name
                 if read_id not in seg_borders or read_id not in read_reader_map:
                     continue
@@ -833,7 +971,7 @@ def main():
     pos_refbase    = {}    # (ref_name, ref_pos) -> base char
     pos_ref_context = collections.defaultdict(dict)  # ref_name -> {ref_pos: base}
 
-    n_total = n_eval = n_skip = 0
+    n_total = n_eval = n_skip = n_skip_excluded = 0
 
     for bam_read in tqdm(bam_fh, desc="Processing reads", file=sys.stderr):
         n_total += 1
@@ -843,6 +981,15 @@ def main():
             continue
         if bam_read.mapping_quality < args.min_mapq:
             n_skip += 1
+            continue
+        if exclude_map and read_overlaps_excluded(
+                bam_read.reference_name, bam_read.reference_start,
+                bam_read.reference_end, exclude_map):
+            # Reject the WHOLE read, not just its positions inside the holdout
+            # -- otherwise a read spanning the boundary could still contribute
+            # signal to a neighboring, nominally non-excluded position.
+            n_skip += 1
+            n_skip_excluded += 1
             continue
 
         read_id = bam_read.query_name
@@ -916,7 +1063,9 @@ def main():
                 print(f"  Warning: skipped {read_id}: {e}", file=sys.stderr)
 
     bam_fh.close()
-    print(f"\nReads evaluated: {n_eval:,}  skipped: {n_skip:,}", file=sys.stderr)
+    print(f"\nReads evaluated: {n_eval:,}  skipped: {n_skip:,} "
+         f"(of which {n_skip_excluded:,} overlapped the genomic holdout)",
+         file=sys.stderr)
 
     # ── pass 2: build tensors for eligible positions ──────────────────────────
     eligible = {k: v for k, v in pos_reads.items()
@@ -1015,21 +1164,31 @@ def main():
         # Build (or reuse) the reference row for this position.
         if key not in ref_row_cache:
             ref_base_map_local = pos_ref_context.get(ref_name, {})
-            ref_row_cache[key] = build_reference_row(
-                center_pos=ref_pos,
-                half_window=args.half_window,
-                L=args.L,
-                ref_base_map=ref_base_map_local,
-                kmer_levels=kmer_levels,
-                kmer_size=kmer_size,
-                center_idx=center_idx,
-            )
-        ref_row = ref_row_cache[key]
+            kw = dict(center_pos=ref_pos, half_window=args.half_window, L=args.L,
+                      ref_base_map=ref_base_map_local, kmer_levels=kmer_levels,
+                      kmer_size=kmer_size, center_idx=center_idx)
+            plain = build_reference_row(**kw)
+            ref_row_cache[key] = ((plain, reference_row_revcomp(**kw))
+                                  if args.orient == 'read' else plain)
+        cached = ref_row_cache[key]
+        ref_row = cached[0] if args.orient == 'read' else cached
 
-        tensors[i] = build_pileup_tensor(
-            chunk, ref_row, ref_pos, args.half_window,
-            args.L, args.max_reads
-        )
+        if args.orient == 'read':
+            # Build in + strand orientation (so matches_ref still compares read vs
+            # reference base), mirror the whole image, then install the mirrored
+            # reference row, whose expected levels come from the revcomp k-mer.
+            img = build_pileup_tensor(
+                chunk, ref_row, ref_pos, args.half_window,
+                args.L, args.max_reads
+            )
+            img = mirror_image(img)
+            img[0] = cached[1]
+            tensors[i] = img
+        else:
+            tensors[i] = build_pileup_tensor(
+                chunk, ref_row, ref_pos, args.half_window,
+                args.L, args.max_reads
+            )
         labels_arr[i]  = 1 if (gt_set and key in gt_set) else 0
         ref_names.append(ref_name.encode('utf-8'))
         ref_poss[i]    = ref_pos
@@ -1042,10 +1201,20 @@ def main():
     # ── write HDF5 ────────────────────────────────────────────────────────────
     print(f"\nWriting HDF5 to {args.output} ...", file=sys.stderr)
     with h5py.File(args.output, 'w') as hf:
+        # One image per chunk, gzip level 1. Training reads images in shuffled
+        # order, so a 64-image chunk made every random read fetch ~975 KB off
+        # NFS and inflate 7.6 MB to use 118 KiB -- and HDF5's 1 MB chunk cache
+        # could not hold even one, so nothing was reused. Measured on a compute
+        # node against this filesystem, cold, 3,000 random reads:
+        #   gzip4 chunks=(64,..)   see rawmod_diag/nfsbench.out
+        #   gzip1 chunks=(1,..)     526 img/s   16.5 KiB/img    8.9 MB/s
+        #   none  chunks=(1,..)     348 img/s  118.2 KiB/img   42.2 MB/s
+        # Compressed wins over NFS because the bottleneck is bytes on the wire,
+        # not inflate: the opposite of a local-disk benchmark, where raw is 8x
+        # faster. Level 1 over level 4 costs ~11% size and saves CPU.
         hf.create_dataset('tensors',   data=tensors,              compression='gzip',
-                          compression_opts=4,
-                          chunks=(min(64, n_images), height, W * args.L,
-                                  N_CHANNELS))
+                          compression_opts=1,
+                          chunks=(1, height, W * args.L, N_CHANNELS))
         hf.create_dataset('labels',    data=labels_arr)
         hf.create_dataset('ref_names',
                           data=np.array(ref_names,
@@ -1079,6 +1248,8 @@ def main():
         hf.attrs['partition']     = 'random_nonoverlapping_chunks_sorted_by_read_order'
         if args.level_table:
             hf.attrs['level_table'] = args.level_table
+            hf.attrs['orientation'] = args.orient
+            hf.attrs['strand_filter'] = args.strand
             hf.attrs['center_idx']  = center_idx
             hf.attrs['kmer_size']   = kmer_size
 

@@ -96,9 +96,11 @@ Usage:
               logo_bacteria|logo_plant|logo_mammal|subset_<c1>+<c2>[+c3]} \
       --out-dir <dir> [--epochs N]
 """
+import collections
 import argparse
 import json
 import os
+import time
 import sys
 from pathlib import Path
 
@@ -132,19 +134,31 @@ SPLIT_SEED = 42
 # Reference base(s) at the candidate centre that carry each chemistry, forward
 # strand. 5hmU replaces T (mod_map marks forward-T only). 6mA is A on either
 # strand -> forward A(+)/T(-). 4mC/5mC/5hmC are C on either strand -> C(+)/G(-).
-CHEM_BASES = {
+# With strand-resolved data the centre reference base of an image IS the
+# modified base (minus-strand images are mirrored, so their reference row is
+# complemented), so a chemistry matches exactly one base. The legacy
+# forward-only data pooled both strands at + coordinates and therefore needed
+# the complement as well.
+CHEM_BASES = ({
+    '5hmU': (b'T',), '6mA': (b'A',), '4mC': (b'C',),
+    '5mC':  (b'C',), '5hmC': (b'C',),
+} if os.environ.get('RAWMOD_DATA_GEN', '') == 'strandres' else {
     '5hmU': (b'T',),
     '6mA':  (b'A', b'T'),
     '4mC':  (b'C', b'G'),
     '5mC':  (b'C', b'G'),
     '5hmC': (b'C', b'G'),
-}
+})
 # Organisms (member-name prefixes) that carry each chemistry — used to draw
 # organism-matched test negatives.
 CHEM_ORGS = {
     '5hmU': ('SPO1::',),
     '4mC':  ('HP::',),
-    '6mA':  ('ONT::', 'HP::', 'SPO1::'),
+    # HP:: is back in: it was dropped for strandres on the assumption that
+    # H. pylori 26695 is 4mC-only, which the modkit pileups disprove (41,004
+    # confident 6mA in WT vs 1 in WGA). Its 6mA positives are now typed, so the
+    # fold needs HP's own negatives to keep the contrast organism-matched.
+    '6mA':  ('ONT::', 'SPO1::', 'HP::'),
     '5mC':  ('ONT::', 'SPO1::'),
     '5hmC': ('ONT::', 'SPO1::'),
 }
@@ -152,6 +166,13 @@ CHEM_ORGS = {
 # Cap negatives per organism so HP WGA (500k) cannot dominate; pos_weight in
 # train_one_model handles the residual imbalance. Positives are never capped.
 NEG_CAP = {'ONT::': 30000, 'SPO1::': 40000, 'HP::': 40000}
+# NEG_CAP_<ORG>=N raises/lowers one organism's control-image cap. The SPO1 cap
+# bounds how many bc01-05 control positions exist to split at all, and so caps
+# loco_5hmU's achievable test-negative count.
+for _o in list(NEG_CAP):
+    _v = os.environ.get('NEG_CAP_' + _o.rstrip(':'))
+    if _v:
+        NEG_CAP[_o] = int(_v)
 
 # Real (biological, REBASE/motif-characterized) chemistry content of each
 # BENCH:: organism -- NOT the same as chem_array()'s per-image typing, which
@@ -168,14 +189,21 @@ NEG_CAP = {'ONT::': 30000, 'SPO1::': 40000, 'HP::': 40000}
 # 5hmU are never present in BENCH:: -- those two folds were never affected.
 # Used by loco_<CHEM> to strip chemistry-matching BENCH:: organisms out of
 # extra_idx, mirroring how logo_<group> already excludes the held-out group.
+# Measured content, from the per-modification modkit pileups (confident calls
+# at >=80% modified, cov>=10; see build_modkit_chem_map.py). This drives which
+# BENCH organisms loco_<CHEM> strips from training, so an organism listed here
+# with CHEM is removed entirely for that fold -- "held out" means never seen
+# anywhere. The previous values were REBASE preset guesses and understated
+# several organisms: Anabaena and T. denticola both carry 4mC (16,625 and 7,261
+# confident sites) yet were listed 6mA-only, so loco_4mC trained on them.
 BENCH_ORG_CHEMS = {
-    'Anabaena_WT_5kHz':    {'6mA'},
-    'Ecoli_DM_5kHz':       {'6mA'},
-    'Ecoli_DM_MSssI_5kHz': {'6mA', '5mC'},
-    'Ecoli_WT_5kHz':       {'6mA', '5mC'},
-    'Tdenticola_WT_5kHz':  {'6mA'},
-    'HPJ99_WT_5kHz':       {'6mA', '4mC'},
-    'arabidopsis':         {'5mC'},
+    'Anabaena_WT_5kHz':    {'6mA', '4mC', '5mC'},   # 21,245 / 16,625 / 397
+    'Ecoli_DM_5kHz':       set(),                   # dam-/dcm-: no confident marks
+    'Ecoli_DM_MSssI_5kHz': {'5mC'},                 # M.SssI; dam- so no 6mA
+    'Ecoli_WT_5kHz':       {'6mA', '5mC'},          # 38,041 / 23,285; no 4mC MTase
+    'Tdenticola_WT_5kHz':  {'6mA', '4mC'},          # 25,476 / 7,261
+    'HPJ99_WT_5kHz':       {'6mA', '4mC', '5mC'},   # 49,951 / 7,132 / 130
+    'arabidopsis':         {'5mC'},                 # no per-mod pileup
     'hg001':               {'5mC'},
     'hg002':               {'5mC'},
 }
@@ -188,7 +216,13 @@ HP_WGA = '/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/fea
 # also unbiased site/base sampling. See memory: organism-identifiability-root
 # -cause (strand-pooling was found to be a major dataset/organism batch-effect
 # fingerprint) and results7-8-dann-backfire. Toggle with RAWMOD_DATA_GEN=strand15.
-_P4 = '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features'
+# RAWMOD_FEATURES_ROOT overrides where every features.h5 below is read from,
+# without touching this file -- e.g. to point a training run at a parallel
+# tree of genomic-holdout-excluded features (see
+# scripts/ground_truth/select_holdout_regions.py) instead of the default,
+# unrestricted pipeline4 features.
+_P4 = os.environ.get('RAWMOD_FEATURES_ROOT',
+                     '/fs/cbcb-scratch/bds062/results/rawmod_full_pipeline4/features')
 HP_WT_V2  = f'{_P4}/HP26695_WT_5kHz/features.h5'
 HP_WGA_V2 = f'{_P4}/HP26695_WGA_5kHz/features.h5'
 ONT_FILES_V2 = {
@@ -206,7 +240,16 @@ UMCES_FILES_V2 = {
     'bc05': f'{_P4}/deepmod_umces/train/barcode05.h5',
     'bc01': f'{_P4}/deepmod_umces/test/barcode01_test.h5',
 }
-USE_STRAND15 = os.environ.get('RAWMOD_DATA_GEN', '') == 'strand15'
+USE_STRAND15 = os.environ.get('RAWMOD_DATA_GEN', '') in ('strand15', 'strandres')
+# strandres: every dataset featurized twice, once per strand, with the minus
+# file written in read orientation (--orient read). A site therefore yields two
+# independent images with independent labels, because nanopore reads one strand
+# at a time and a modification on the complement does not change the current of
+# the sequenced strand. See scripts/featurize/refeaturize_strand_resolved.py.
+USE_STRANDRES = os.environ.get('RAWMOD_DATA_GEN', '') == 'strandres'
+_SR = os.environ.get('RAWMOD_STRANDRES_ROOT',
+                     '/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved/features')
+STRANDS = ('+', '-')
 HEIGHT = 16 if USE_STRAND15 else 31   # 1 ref row + (15 or 30) reads
 
 # Extra-organism curriculum (EXTRA_ORGANISMS=1): 7 ONT-basemod-benchmark
@@ -252,6 +295,11 @@ LOGO_GROUPS = {
                 'Ecoli_WT_5kHz', 'Tdenticola_WT_5kHz', 'HPJ99_WT_5kHz'],
     'plant':    ['arabidopsis'],
     'mammal':   ['hg001', 'hg002'],
+    # single-organism holdouts (finer than 'bacteria'): the other bacteria stay in stage 2
+    'ecoli':      ['Ecoli_DM_5kHz', 'Ecoli_DM_MSssI_5kHz', 'Ecoli_WT_5kHz'],
+    'anabaena':   ['Anabaena_WT_5kHz'],
+    'tdenticola': ['Tdenticola_WT_5kHz'],
+    'hpj99':      ['HPJ99_WT_5kHz'],
 }
 
 # The 6 bacterial BENCH:: datasets are 100% positive (no negatives -- see
@@ -272,8 +320,57 @@ BGCTRL_FILES = {
 }
 
 
+def _sr(name, strand):
+    return f"{_SR}/{name}_{'plus' if strand == '+' else 'minus'}.h5"
+
+
+def build_members_strandres():
+    """name -> h5 path, one member per (dataset, strand).
+
+    Member names carry the strand after a '|' so org_of() (which splits on '::')
+    is unchanged, e.g. 'SPO1::bc06|-'.
+    """
+    sr_ont = {'5mC': 'ONT_5mC', '5hmC': 'ONT_5hmC', '6mA': 'ONT_6mA',
+              'control': 'ONT_control'}
+    sr_bc = {'bc06': 'barcode06', 'bc07': 'barcode07', 'bc02': 'barcode02_train',
+             'bc03': 'barcode03_train', 'bc04': 'barcode04_train',
+             'bc05': 'barcode05_train', 'bc01': 'barcode01_test'}
+    m = {}
+    for strand in STRANDS:
+        if strand == '+':
+            # The ONT constructs were sequenced almost entirely in one
+            # orientation (e.g. 5mC: 21,923 forward images vs 490 reverse), and
+            # their modification sits at 256 designed + strand positions, so the
+            # minus strand offers no positives and negligible coverage.
+            for mod, f in sr_ont.items():
+                m[f'ONT::{mod}|{strand}'] = _sr(f, strand)
+        for bc, f in sr_bc.items():
+            m[f'SPO1::{bc}|{strand}'] = _sr(f, strand)
+        m[f'HP::WT|{strand}'] = _sr('HP26695_WT_5kHz', strand)
+        m[f'HP::WGA|{strand}'] = _sr('HP26695_WGA_5kHz', strand)
+        if USE_EXTRA_ORGS:
+            for name in BENCH_FILES:
+                m[f'BENCH::{name}|{strand}'] = _sr(name, strand)
+        if USE_HUMAN:
+            for name in HUMAN_FILES:
+                m[f'BENCH::{name}|{strand}'] = _sr(name, strand)
+    return {k: v for k, v in m.items() if os.path.exists(v)}
+
+
+def strand_of(name):
+    """'+' or '-' for a member name; '+' for legacy (forward-only) members."""
+    return '-' if name.endswith('|-') else '+'
+
+
+def dataset_of(name):
+    """Member name without the organism prefix and strand suffix."""
+    return name.split('::')[1].split('|')[0]
+
+
 def build_members():
     """name -> h5 path for the matched-only pool (prefixes encode the organism)."""
+    if USE_STRANDRES:
+        return build_members_strandres()
     ont_files = ONT_FILES_V2 if USE_STRAND15 else R.ONT_FILES
     umces_files = UMCES_FILES_V2 if USE_STRAND15 else R.UMCES_FILES
     m = {}
@@ -309,11 +406,53 @@ def ref_base_center(group):
     offsets = np.concatenate([[0], np.cumsum(group.file_sizes)])
     for fi, path in enumerate(group.paths):
         lo, hi = int(offsets[fi]), int(offsets[fi + 1])
-        with h5py.File(path, 'r') as hf:
-            L = int(hf.attrs['L']); cs = int(hf.attrs['half_window']) * L
-            oh = hf['tensors'][:, 0, cs, 2:6]        # (n,4)
+        # Retry on transient NFS read failures, same as model._h5_read(). This
+        # path had no retry and it is the one that killed loco_5hmU (7643900)
+        # with [Errno 5] on Ecoli_WT_5kHz_minus.h5 when 18 jobs streamed the
+        # same mount: the DataLoader was protected, the setup pass was not.
+        for attempt in range(5):
+            try:
+                with h5py.File(path, 'r') as hf:
+                    L = int(hf.attrs['L']); cs = int(hf.attrs['half_window']) * L
+                    oh = hf['tensors'][:, 0, cs, 2:6]        # (n,4)
+                break
+            except OSError as e:
+                if attempt == 4:
+                    raise
+                print(f"  [ref_base_center] read retry {attempt + 1}/4 on "
+                      f"{os.path.basename(path)}: {e}", file=sys.stderr, flush=True)
+                time.sleep(0.5 * 2 ** attempt)
         out[lo:hi] = bases[np.argmax(oh, axis=1)]
     return out
+
+
+CHEM_MAP_DIR = os.environ.get(
+    'RAWMOD_CHEM_MAP', '/fs/cbcb-scratch/bds062/data/gt_modkit/chem_map')
+_chem_map_cache = {}
+
+
+def modkit_chem_map(dataset):
+    """{(contig, pos, strand): chem} from build_modkit_chem_map.py, or {} if
+    that dataset has no per-modification pileups (ONT, human, arabidopsis,
+    SPO1 -- those keep the reference-base rules below).
+
+    Why this exists: typing a positive by its reference base assigns every
+    C-site positive the one C mark BENCH_ORG_CHEMS lists for the organism.
+    H. pylori 26695 carries 4mC AND 5mC AND 6mA, so that rule mislabels its
+    C positives and throws away its 41,004 6mA positives as 'untyped'.
+    """
+    if dataset in _chem_map_cache:
+        return _chem_map_cache[dataset]
+    path = os.path.join(CHEM_MAP_DIR, f'{dataset}.tsv')
+    m = {}
+    if os.path.exists(path):
+        with open(path) as fh:
+            next(fh, None)
+            for line in fh:
+                c, pos, st, chem = line.rstrip('\n').split('\t')
+                m[(c, int(pos), st)] = chem
+    _chem_map_cache[dataset] = m
+    return m
 
 
 def chem_array(group, mod_map, refbase):
@@ -323,17 +462,80 @@ def chem_array(group, mod_map, refbase):
     for i in np.nonzero(modified)[0]:
         nm = group.names[int(group.file_of[i])]
         if nm.startswith('ONT::'):
-            chem[i] = nm.split('::')[1]              # control has no positives
+            chem[i] = dataset_of(nm)                 # control has no positives
         elif nm.startswith('SPO1::'):
-            key = (group.contig[i], int(group.ref_pos[i]))
-            t = mod_map.get(key)
-            if t is None:                            # fallback by ref base
-                t = '5hmU' if refbase[i] == b'T' else 'untyped'
-            chem[i] = t
-        elif nm == 'HP::WT':
-            b = refbase[i]
-            chem[i] = ('6mA' if b in (b'A', b'T')
-                       else '4mC' if b in (b'C', b'G') else 'untyped')
+            if strand_of(nm) == '-':
+                # SPO1 minus positives are USUALLY the reference-A positions,
+                # i.e. 5hmU on the complementary strand, and the + strand modkit
+                # typing (mod_map) describes the other strand so it must not be
+                # used here. But this branch used to assert '5hmU'
+                # unconditionally, from the file's strand alone, without
+                # checking the base -- and modkit_gt.py has a SECOND source
+                # besides the all-T rule: dorado's own calls, keyed on the
+                # pileup's strand column. Measured in gt_minus.bed for bc06:
+                # 43,581 entries at reference-A (correct, minus base T = 5hmU)
+                # but 95 at reference-T, whose minus base is A. A modified
+                # adenine is 6mA, not 5hmU. Those 150 images (bc06+bc07) sat in
+                # loco_6mA's TRAINING set -- the held-out chemistry, wearing a
+                # 5hmU label -- and they were also what disabled the
+                # orphan-base guard for that fold. refbase is already
+                # complemented for a mirrored minus image, so it IS the
+                # modified base; type from it, exactly as the plus branch does.
+                if refbase[i] == b'T':
+                    chem[i] = '5hmU'
+                elif refbase[i] == b'A':
+                    chem[i] = '6mA'
+                else:
+                    chem[i] = 'untyped'
+            else:
+                key = (group.contig[i], int(group.ref_pos[i]))
+                t = mod_map.get(key)
+                if t is None:                        # fallback by ref base
+                    t = '5hmU' if refbase[i] == b'T' else 'untyped'
+                chem[i] = t
+        elif nm.startswith('BENCH::'):
+            ds = dataset_of(nm)
+            cm = modkit_chem_map(ds)
+            if cm:
+                chem[i] = cm.get((group.contig[i], int(group.ref_pos[i]),
+                                  strand_of(nm)), 'untyped')
+            else:
+                # No per-modification pileup for this dataset (arabidopsis,
+                # hg001/hg002): fall back to the organism's single mark.
+                cs = BENCH_ORG_CHEMS.get(ds, set())
+                b = refbase[i]
+                if b == b'A' and '6mA' in cs:
+                    chem[i] = '6mA'
+                elif b == b'C':
+                    chem[i] = ('5mC' if '5mC' in cs else '4mC' if '4mC' in cs else 'untyped')
+                else:
+                    chem[i] = 'untyped'
+        elif nm.split('|')[0] == 'HP::WT':
+            # H. pylori 26695 is NOT 4mC-only. Its modkit pileups give 41,004
+            # confident 6mA and 16,209 confident 5mC calls alongside 19,442 4mC,
+            # and the WGA control has 1, 7 and 449 respectively -- so the 6mA and
+            # 5mC are real, and the old hardcoded '4mC if C' rule was scoring a
+            # 4mC/5mC mixture as 4mC. The earlier hp_offset_scan.py result showed
+            # only that the preset's CTTCAAG motif is not where the 6mA sits.
+            chem[i] = modkit_chem_map('HP26695_WT_5kHz').get(
+                (group.contig[i], int(group.ref_pos[i]), strand_of(nm)), 'untyped')
+    # GLOBAL INVARIANT: a chemistry must sit on the base it modifies.
+    # refbase is the image's own centre reference base, already complemented for
+    # a mirrored minus image, so it IS the modified base. Anything inconsistent
+    # is a mistyped image, not a discovery -- audit_loco.py found 7 HP positives
+    # typed 6mA on a C and 2 bacterial positives typed 4mC on an A, all from
+    # modkit reporting a mod code at a base that cannot carry it. This catches
+    # every such case regardless of which source assigned the type, which is the
+    # same class of bug as the SPO1 minus-strand one above.
+    _BASE_OF = {'5mC': b'C', '5hmC': b'C', '4mC': b'C', '6mA': b'A', '5hmU': b'T'}
+    n_bad = 0
+    for i in np.nonzero(modified)[0]:
+        want = _BASE_OF.get(chem[i])
+        if want is not None and refbase[i] != want:
+            chem[i] = 'untyped'; n_bad += 1
+    if n_bad:
+        print(f"  [invariant] {n_bad:,} positives retyped 'untyped': assigned "
+              f"chemistry did not match centre base", flush=True)
     return chem
 
 
@@ -385,14 +587,21 @@ def parse_subset_fold(fold):
     return sorted(chems)
 
 
-def mixed_split(pool, is_pos, neg_mask, hp):
+def mixed_split(pool, is_pos, neg_mask, hp, core_mask=None):
     """Deterministic 85/15 position-grouped split of the whole matched pool (all 5
     chemistries + capped controls) -- the 'mixed' in-distribution fold. Factored out
     so a downstream analysis (e.g. a post-hoc embedding probe) can recompute the
     EXACT same train/test image indices used to train the mixed checkpoint, without
     re-deriving the split logic. Deterministic given (pool, SPLIT_SEED) -- NOT hp.seed,
-    so this stays identical across a --seed replicate run."""
-    keep = np.nonzero(is_pos | neg_mask)[0]
+    so this stays identical across a --seed replicate run.
+
+    core_mask (optional) restricts the split to the core matched pool. main()
+    passes ~is_bench: BENCH:: extra organisms are unioned into stage-2 training
+    for EVERY fold by fit(), so leaving them in this split would put images in
+    the held-out test set that the model is trained on regardless. They now go
+    entirely into training, matching how every other fold treats them."""
+    keep = np.nonzero((is_pos | neg_mask) if core_mask is None
+                      else ((is_pos | neg_mask) & core_mask))[0]
     tr, _, te, stats = split_position_groups(
         pool.labels[keep], [pool.position_keys[i] for i in keep],
         val_frac=0.0, test_frac=0.15, seed=SPLIT_SEED)
@@ -431,6 +640,10 @@ def main():
                          'for a clean replicate-seed run. Deliberately does NOT affect '
                          'SPLIT_SEED (train/test composition stays identical across seeds), '
                          'so a different result reflects training noise, not a different test set.')
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Build the pool and the fold split, print the census and the '
+                         'disjointness checks, then exit without training or scoring. '
+                         'Used to sanity-check a new data generation before burning GPU hours.')
     a = ap.parse_args()
 
     valid = ['mixed', 'all'] + [f'loco_{c}' for c in CHEMS] + [f'logo_{g}' for g in LOGO_GROUPS]
@@ -468,6 +681,30 @@ def main():
     is_bench = np.array([pool.names[int(pool.file_of[i])].startswith('BENCH::')
                          for i in range(pool.N)])
     bench_idx = np.nonzero(is_bench)[0].astype(np.int64)
+    # AMBIGUOUS POSITIVES (EXCLUDE_UNTYPED_POS=1, default on)
+    # ------------------------------------------------------------------
+    # A C-site positive that BOTH the 4mC and the 5mC single-mod models call
+    # at >=80% cannot be assigned a chemistry from this data (see
+    # build_modkit_chem_map.py: 81% of H. pylori's C positives are claimed by
+    # both). chem_array types those 'untyped', and the CORE pool already drops
+    # them -- pos_other requires chem not in ('', 'untyped'). The BENCH
+    # curriculum did NOT: fit() unions every BENCH image regardless of
+    # chemistry, so they entered stage-2 training as positives anyway.
+    #
+    # Measured by audit_loco.py, untyped positives on the held-out base that
+    # were reaching training:  loco_5hmC 16,378   loco_4mC 6,733
+    # loco_5mC 803   loco_6mA 146   loco_5hmU 0.
+    # The 6,733 are the real exposure: some genuine fraction of them IS 4mC,
+    # which made loco_4mC impossible to certify. An ambiguous label helps no
+    # fold enough to be worth that, so they are dropped from training
+    # everywhere. Their NEGATIVES are unaffected.
+    if os.environ.get('EXCLUDE_UNTYPED_POS', '1') == '1' and len(bench_idx):
+        amb = is_pos[bench_idx] & np.isin(chem[bench_idx], ['', 'untyped'])
+        if amb.any():
+            print(f"  [ambiguity] dropping {int(amb.sum()):,} BENCH positives with "
+                  f"no assignable chemistry from stage-2 training "
+                  f"({len(bench_idx):,} -> {int((~amb).sum()):,})", flush=True)
+            bench_idx = bench_idx[~amb]
     if len(bench_idx):
         n_bench_sets = sum(1 for nm in names if nm.startswith('BENCH::'))
         print(f"  extra organisms (BENCH::, stage-2 training only): "
@@ -476,8 +713,10 @@ def main():
               f"neg={int((~is_pos[bench_idx]).sum()):,})", flush=True)
 
     # Per-image BENCH:: organism name (for logo_<group> filtering), '' elsewhere.
+    # dataset_of() strips the '|+'/'|-' strand suffix so these still match
+    # BENCH_ORG_CHEMS / LOGO_GROUPS keys under strand-resolved data
     bench_org_of = np.array([
-        pool.names[int(pool.file_of[i])].split('::')[1] if is_bench[i] else ''
+        dataset_of(pool.names[int(pool.file_of[i])]) if is_bench[i] else ''
         for i in range(pool.N)])
 
     # BGCTRL:: background-control images (non-motif negatives for the 6
@@ -498,6 +737,8 @@ def main():
 
     # ── W&B ────────────────────────────────────────────────────────────────────
     wandb_run = None
+    if a.dry_run:
+        os.environ['WANDB_DISABLED'] = '1'
     if os.environ.get('WANDB_DISABLED', '').lower() not in ('1', 'true', 'yes'):
         os.environ.setdefault('WANDB_MODE', 'online')
         os.environ.setdefault('WANDB_DIR', str(Path(__file__).resolve().parent))
@@ -523,8 +764,19 @@ def main():
     if sad_dim > 0:
         print(f"  [DeepSAD] sad_dim={sad_dim} weight={os.environ.get('SAD_WEIGHT','1.0')} "
               f"eta={os.environ.get('SAD_ETA','1.0')}", flush=True)
-    model_factory = lambda: ConvFormerV2(dropout=hp.dropout, supcon_dim=supcon_dim,
-                                         sad_dim=sad_dim, h=HEIGHT)
+    # RAWMOD_DROP_CH9=1 drops the center-base delta channel (see model.py /
+    # PileupDataset.drop_ch9): 11 -> 10 input channels.
+    _in_ch = 10 if os.environ.get('RAWMOD_DROP_CH9', '0') == '1' else 11
+    # Architecture ablations: TF_LAYERS (cross-read Transformer depth, 0 = mean-pool read
+    # tokens directly) and ROW_EMB=0 (no learned row embedding). Defaults = published model.
+    tf_layers = int(os.environ.get('TF_LAYERS', '2'))
+    row_emb = os.environ.get('ROW_EMB', '1') == '1'
+    if tf_layers != 2 or not row_emb:
+        print(f"  [arch] tf_layers={tf_layers} row_emb={row_emb}", flush=True)
+    model_factory = lambda: ConvFormerV2(in_ch=_in_ch, dropout=hp.dropout,
+                                         supcon_dim=supcon_dim,
+                                         sad_dim=sad_dim, h=HEIGHT,
+                                         layers=tf_layers, row_emb=row_emb)
     rows = []
 
     def sad_auroc(model, idx):
@@ -556,7 +808,34 @@ def main():
     curriculum = os.environ.get('CURRICULUM', '0') == '1'
     cur_epochs = int(os.environ.get('CURRICULUM_EPOCHS', '15'))
 
+    # RAWMOD_SCORE_CKPT=<path> : skip training and score this checkpoint on the
+    # fold's test set instead. Reuses main()'s exact test_idx construction, so the
+    # ceiling ("what does a model that HAS seen this chemistry get on these very
+    # positions?") is measured on the identical population the LOCO run was scored
+    # on -- not an approximation of it. Checked FIRST in fit(): an earlier version
+    # sat on the non-curriculum return path, so with CURRICULUM=1 it silently
+    # trained a fresh LOCO model instead.
+    _score_ckpt = os.environ.get('RAWMOD_SCORE_CKPT', '')
+
     def fit(train_idx, fold_dir, runtag, extra_idx=None):
+        if a.dry_run:
+            extra = bench_idx if extra_idx is None else extra_idx
+            n2 = len(np.union1d(train_idx, extra)) if len(extra) else len(train_idx)
+            print(f"  [dry-run] would train {runtag}: core={len(train_idx):,} "
+                  f"+extra={len(extra):,} -> stage2={n2:,} distinct images "
+                  f"(pos={int(is_pos[np.union1d(train_idx, extra)].sum()):,})", flush=True)
+            return None
+        if _score_ckpt:
+            m = model_factory() if model_factory else None
+            if m is None:
+                raise SystemExit('RAWMOD_SCORE_CKPT needs a model_factory')
+            st = torch.load(_score_ckpt, map_location=device)
+            sd = st.get('model_state', st.get('model', st))
+            m.load_state_dict(sd)
+            if isinstance(sd, dict) and 'sad_center' in sd:
+                m.sad_center = sd['sad_center'].to(device)
+            print(f"  [score-ckpt] loaded {_score_ckpt} (no training)", flush=True)
+            return m.to(device).eval()
         mdir = out / 'models' / fold_dir
         # Stage-2 training set = this fold's train_idx UNION the extra-organism
         # (BENCH::) pool, if any. Stage-1 (anchors, below) deliberately uses the
@@ -588,11 +867,116 @@ def main():
         return R.train_one_model(pool, stage2_idx, hp, device, mdir, runtag,
                                  model_factory=model_factory)
 
+    def _fewshot(chem_x, train_idx, test_idx):
+        """FEWSHOT_K=K  FEWSHOT_SEED=s  FEWSHOT_INIT=<loco checkpoint>
+        Few-shot adaptation curve for a LOCO fold.
+
+        Protocol ("pretrain on donors, adapt on K labelled target sites"):
+          * The fold's held-out positions are split ONCE, by coordinate hash,
+            into a SUPPORT half and a QUERY half. The split ignores K and the
+            seed, so every point on a curve is scored on the SAME query set.
+            Splitting by coordinate keeps the matched positive and control
+            images of one site on the same side, so no shot's sequence context
+            reappears in query.
+          * Shots = K positive + K negative sites from SUPPORT, taken in a
+            seeded hash order, so the K=10 sites are a subset of the K=100
+            sites: the curve moves with K, not with which sites were drawn.
+          * Fine-tune FROM the LOCO checkpoint on shots (repeated so they are
+            ~25% of the set) plus a replay sample of donor training data, for a
+            fixed number of epochs, keeping the FINAL weights. Validation is
+            donor replay only; every shot site reaches training.
+          * K=0 skips fine-tuning: it is the LOCO model scored on QUERY.
+        Adding shots to a full retrain instead would bury ~50 images among
+        ~800k and measure noise at small K.
+        """
+        import zlib
+        K = int(os.environ['FEWSHOT_K']); fseed = int(os.environ.get('FEWSHOT_SEED', '0'))
+        init = os.environ['FEWSHOT_INIT']
+        def _h(i, tag):
+            key = f"{tag}:{pool.contig[i]}:{int(pool.ref_pos[i])}".encode()
+            return (zlib.crc32(key) & 0xffffffff) / 0xffffffff
+        test_idx = np.asarray(test_idx, dtype=np.int64)
+        in_sup = np.array([_h(int(i), 'fs_support') < 0.5 for i in test_idx], dtype=bool)
+        sup_idx, query_idx = test_idx[in_sup], test_idx[~in_sup]
+        # group support images by SOURCE-aware site (positive and control images
+        # at one coordinate are different sources, hence different groups)
+        skeys = pool.source_keys(sup_idx)
+        groups = {}
+        for i, k in zip(sup_idx, skeys):
+            groups.setdefault(k, []).append(int(i))
+        rank = lambda k: zlib.crc32(f"fsrank:{fseed}:{k}".encode())
+        gpos = sorted((k for k, v in groups.items() if is_pos[v[0]]), key=rank)
+        gneg = sorted((k for k, v in groups.items() if not is_pos[v[0]]), key=rank)
+        kp, kn = min(K, len(gpos)), min(K, len(gneg))
+        q_pos = int(is_pos[query_idx].sum())
+        print(f"  [fewshot] {chem_x} K={K} seed={fseed}: support sites pos={len(gpos):,} "
+              f"neg={len(gneg):,} -> shots pos={kp} neg={kn}"
+              + ("  (CAPPED: fewer support sites than K)" if kp < K or kn < K else "")
+              + f" | query images={len(query_idx):,} (pos={q_pos:,})", flush=True)
+
+        mode = os.environ.get('FEWSHOT_MODE', 'finetune')
+        if mode == 'pool':
+            # IN-POOL: add the K shot sites (all their images, unrepeated) to the
+            # LOCO training pool and train from scratch with the normal recipe
+            # (curriculum + BENCH extras). Answers "how many labelled target
+            # sites must the training pool contain", and at K=all support sites
+            # it is the leak-free supervised ceiling on the SAME query half.
+            shot_idx = np.array(sorted(i for k in gpos[:kp] + gneg[:kn] for i in groups[k]),
+                                dtype=np.int64)
+            tr_pool = np.unique(np.concatenate([np.asarray(train_idx, np.int64), shot_idx]))
+            R.assert_disjoint(tr_pool, query_idx, pool, a.fold)
+            print(f"  [fewshot-pool] +{len(shot_idx):,} shot images -> train pool "
+                  f"{len(tr_pool):,}", flush=True)
+            m = fit(tr_pool, f'{a.fold}_pool{K}_s{fseed}', 'loco', extra_idx=clean_extra)
+            record(m, f'fewshot{K}_{chem_x}', query_idx, held=chem_x)
+            return
+
+        mf = model_factory
+        st = torch.load(init, map_location=device)
+        sd = st.get('model_state', st.get('model', st))
+        if K == 0:
+            m = mf(); m.load_state_dict(sd); m = m.to(device).eval()
+            record(m, f'fewshot0_{chem_x}', query_idx, held=chem_x)
+            return
+
+        shot_idx = np.array(sorted(i for k in gpos[:kp] + gneg[:kn] for i in groups[k]),
+                            dtype=np.int64)
+        # donor replay: disjoint train/val halves by coordinate hash
+        rng = np.random.default_rng(1000 + fseed)
+        tr = np.asarray(train_idx, dtype=np.int64)
+        rv = np.array([_h(int(i), 'fs_replayval') < 0.1 for i in tr], dtype=bool)
+        n_rep = int(os.environ.get('FEWSHOT_REPLAY', '30000'))
+        rep_tr = rng.choice(tr[~rv], min(n_rep, int((~rv).sum())), replace=False)
+        rep_va = rng.choice(tr[rv], min(n_rep // 6, int(rv.sum())), replace=False)
+        reps = max(1, min(50, int(round(0.25 * len(rep_tr) / max(len(shot_idx), 1)))))
+        ft_idx = np.sort(np.concatenate([rep_tr, np.tile(shot_idx, reps)]))
+        print(f"  [fewshot] shot images={len(shot_idx):,} x{reps} + replay={len(rep_tr):,} "
+              f"(val replay={len(rep_va):,})", flush=True)
+
+        hpf = R.HP()
+        hpf.epochs = int(os.environ.get('FEWSHOT_EPOCHS', '8'))
+        hpf.patience = hpf.epochs
+        hpf.lr = float(os.environ.get('FEWSHOT_LR', '2e-4'))
+        mdir = out / 'models' / f'{a.fold}_fs{K}_s{fseed}'
+        m = R.train_one_model(pool, ft_idx, hpf, device, mdir, f'fs{K}_s{fseed}',
+                              model_factory=mf, init_state=sd,
+                              val_idx=np.sort(rep_va), keep_last=True)
+        record(m, f'fewshot{K}_{chem_x}', query_idx, held=chem_x)
+
     def record(model, test_name, idx, held=''):
+        if a.dry_run:
+            y = is_pos[np.asarray(idx, np.int64)]
+            print(f"  [dry-run] test {test_name}: n={len(idx):,} pos={int(y.sum()):,} "
+                  f"neg={int((~y).sum()):,}", flush=True)
+            return
         m = R.evaluate(model, pool, idx, device, hp)
         if getattr(model, 'sad_head', None) is not None:
             m['auroc_sad'] = sad_auroc(model, idx)     # anomaly-score AUROC
         rows.append({'fold': a.fold, 'test_set': test_name, 'held_out': held, **m})
+        if R.LAST_EVAL is not None:                 # per-position scores for bootstrap CIs
+            sdir = out / 'scores'; sdir.mkdir(parents=True, exist_ok=True)
+            yt_, yp_ = R.LAST_EVAL
+            np.savez_compressed(sdir / f'{a.fold}__{test_name}.npz', y_true=yt_, y_score=yp_)
         sad_msg = f" auroc_sad={m['auroc_sad']:.3f}" if 'auroc_sad' in m else ""
         print(f"  EVAL {test_name}: mod_f1={m['mod_f1']:.3f} mod_rec={m['mod_rec']:.3f} "
               f"mod_prec={m['mod_prec']:.3f} auprc={m['auprc']:.3f} "
@@ -616,7 +1000,8 @@ def main():
               "different organism.", flush=True)
 
     elif a.fold == 'mixed':
-        train_idx, test_idx, stats = mixed_split(pool, is_pos, neg_mask, hp)
+        train_idx, test_idx, stats = mixed_split(pool, is_pos, neg_mask, hp,
+                                                 core_mask=~(is_bench | is_bgctrl))
         print(f"  {stats}", flush=True)
         model = fit(train_idx, a.fold, 'mixed')
         record(model, 'held_out_test', test_idx)
@@ -631,9 +1016,222 @@ def main():
         te_ctrl = np.array([i for i in te_ctrl
                             if org_of(pool.names[int(pool.file_of[i])]) in orgs
                             and refbase[i] in bases], dtype=np.int64)
-        pos_x = np.nonzero(is_pos & (chem == chem_x))[0].astype(np.int64)
+        # BENCH:: images are stage-2 curriculum data only (see build_members /
+        # fit()): per-image chemistry typing (chem_array) now resolves them, but
+        # that typing exists for the leak guard below, NOT to promote them into
+        # the core train/test sets -- the bacterial BENCH:: sets are ~100%
+        # positive, so putting them in a test set would hand the model an
+        # organism-identity shortcut instead of a chemistry one.
+        pos_x = np.nonzero(is_pos & (chem == chem_x) & ~is_bench)[0].astype(np.int64)
         pos_other = np.nonzero(is_pos & (chem != chem_x) & (chem != '')
-                               & (chem != 'untyped'))[0].astype(np.int64)
+                               & (chem != 'untyped') & ~is_bench)[0].astype(np.int64)
+
+        # BASE-BALANCED POSITIVES (POS_BASE_CAP_RATIO=R)
+        # ------------------------------------------------------------------
+        # Measured for loco_6mA: training positives are T=119,710, C=6,231,
+        # A=150. SPO1's 5hmU is 95% of everything the model ever sees labelled
+        # "modified", so "modified" collapses to "is a T" -- and the fold then
+        # asks for A. Capping the dominant base at R x the next-largest keeps
+        # the majority chemistry from defining the positive class.
+        ratio = float(os.environ.get('POS_BASE_CAP_RATIO', '0'))
+        if ratio > 0 and len(pos_other):
+            rng = np.random.default_rng(SPLIT_SEED)
+            by_base = {}
+            for i in pos_other:
+                by_base.setdefault(refbase[i], []).append(i)
+            counts = sorted((len(v) for v in by_base.values()), reverse=True)
+            floor = counts[1] if len(counts) > 1 else counts[0]
+            cap = max(int(ratio * floor), 1)
+            kept = []
+            for b, idx in sorted(by_base.items()):
+                idx = np.asarray(idx, dtype=np.int64)
+                if len(idx) > cap:
+                    idx = rng.choice(idx, cap, replace=False)
+                kept.append(idx)
+                print(f"  [base-balance] {b.decode()}: "
+                      f"{len(by_base[b]):,} -> {len(idx):,}", flush=True)
+            pos_other = np.sort(np.concatenate(kept))
+
+        # POS_DROP_BASES=T[,C] : remove training positives at these bases
+        # ENTIRELY, not merely cap them. For loco_6mA the core training
+        # positives are 95% T (SPO1 5hmU); capping leaves T an equal-sized
+        # class, whereas dropping it forces the model to reach A from C
+        # evidence alone. Deliberately spends the C folds to buy the two
+        # orphan-base folds.
+        drop_b = os.environ.get('POS_DROP_BASES', '')
+        if drop_b and len(pos_other):
+            want = {b.strip().encode() for b in drop_b.split(',') if b.strip()}
+            keepm = np.array([refbase[i] not in want for i in pos_other], dtype=bool)
+            print(f"  [pos-drop-bases] dropping {sorted(b.decode() for b in want)}: "
+                  f"{len(pos_other):,} -> {int(keepm.sum()):,} training positives",
+                  flush=True)
+            pos_other = pos_other[keepm]
+
+        # POS_CHEM_OVERSAMPLE="5hmC:10,4mC:2"  /  POS_DROP_CHEMS="6mA"
+        # ------------------------------------------------------------------
+        # Base-level balancing (POS_BASE_CAP_RATIO) cannot reach inside a base:
+        # measured pool census is 5mC 73,098 / 6mA 67,036 / 5hmU 119,710 /
+        # 4mC 3,490 / 5hmC 1,280, so within C the 5mC:5hmC ratio is 57:1 and
+        # 5hmC ends up ~4% of loco_5hmU's 31,155 training positives.
+        #
+        # That matters because 5hmC is the closest chemical analogue of 5hmU in
+        # this corpus -- both are a 5-hydroxymethyl on a pyrimidine ring, i.e.
+        # the same (modified-position) family that matched-LOCO transfer was
+        # measured to work within. The donor most likely to carry the target is
+        # the one training barely sees.
+        #
+        # OVERSAMPLE repeats indices (duplicates in train_idx are harmless and
+        # stay disjoint from test); DROP_CHEMS removes a chemistry outright, e.g.
+        # to strip the purine 6mA distractor from a pyrimidine target's fold.
+        _drop_ch = os.environ.get('POS_DROP_CHEMS', '')
+        if _drop_ch and len(pos_other):
+            want = {c.strip() for c in _drop_ch.split(',') if c.strip()}
+            keepm = ~np.isin(chem[pos_other], list(want))
+            print(f"  [pos-drop-chems] dropping {sorted(want)}: "
+                  f"{len(pos_other):,} -> {int(keepm.sum()):,} training positives",
+                  flush=True)
+            pos_other = pos_other[keepm]
+        _os_spec = os.environ.get('POS_CHEM_OVERSAMPLE', '')
+        if _os_spec and len(pos_other):
+            reps = {}
+            for part in _os_spec.split(','):
+                if ':' in part:
+                    c, n = part.split(':'); reps[c.strip()] = int(n)
+            add = []
+            for c, n in sorted(reps.items()):
+                sel = pos_other[chem[pos_other] == c]
+                if len(sel) and n > 1:
+                    add.append(np.tile(sel, n - 1))
+                    print(f"  [pos-chem-oversample] {c}: {len(sel):,} x{n} "
+                          f"(+{len(sel)*(n-1):,} repeats)", flush=True)
+            if add:
+                pos_other = np.sort(np.concatenate([pos_other] + add))
+
+        # CTRL_TARGET_BASE_TO_TEST=0|orphan|all
+        # ------------------------------------------------------------------
+        # An orphan-base fold only makes sense if the control positions AT THE
+        # TARGET BASE are spent on the measurement rather than on training.
+        #
+        # Measured for loco_5hmU: pos_x takes ALL 5hmU positives into test
+        # un-split, but the negatives are only pos_hash_split's 15% slice, and
+        # SPO1 controls are NEG_CAP'd (40k default) of which ~50% are T-centred.
+        # After position aggregation that left 807 negatives against 23,942
+        # positives (96.7% positive), so AUROC was estimated against <1k points
+        # and moved on run-to-run noise alone.
+        #
+        # The other 85% was not missing -- it was in TRAINING, where (per the
+        # orphan-base note below) it is exactly the population that installs
+        # "T is unmodified" before the fold asks for modified T. Moving it to
+        # test fixes the class balance and removes the harmful prior at once.
+        # Whole positions move (org and refbase are constant within a
+        # coordinate), so position-grouped disjointness still holds --
+        # assert_disjoint below re-checks it.
+        #
+        # mode=orphan restricts this to folds whose target base carries no
+        # training positives, making it a no-op on 5mC/5hmC/4mC (which share C
+        # and DO need their C negatives in training). Must run after
+        # base-balancing and POS_DROP_BASES, since those decide pos_other.
+        #
+        # NOTE: this CHANGES the test set. Numbers are not comparable to runs
+        # made without it; report as its own series with class balance stated.
+        _c2t = os.environ.get('CTRL_TARGET_BASE_TO_TEST', '0')
+        if _c2t not in ('0', '', 'off'):
+            _share = float(os.environ.get('ORPHAN_BASE_MIN_SHARE', '0.01'))
+            _cnt = collections.Counter(refbase[pos_other].tolist())
+            _tot = max(sum(_cnt.values()), 1)
+            _covered = {b for b, n in _cnt.items() if n / _tot >= _share}
+            _orphan = tuple(b for b in bases if b not in _covered)
+            if _c2t == 'orphan' and not _orphan:
+                print(f"  [ctrl->test] {chem_x}: target base(s) "
+                      f"{[b.decode() for b in bases]} already carry training "
+                      f"positives; no move (mode=orphan)", flush=True)
+            else:
+                mv = np.array([org_of(pool.names[int(pool.file_of[i])]) in orgs
+                               and refbase[i] in bases for i in tr_ctrl], dtype=bool)
+                # Two INDEPENDENT knobs, both position-grouped by coordinate:
+                #   CTRL_TARGET_BASE_TEST_FRAC  (default 1.0) fraction of
+                #     target-base control positions moved to TEST.
+                #   CTRL_TARGET_BASE_TRAIN_KEEP (default 1.0) fraction of the
+                #     NOT-moved remainder retained in TRAINING (rest dropped).
+                # Keeping these separate is what makes the arms comparable: fix
+                # TEST_FRAC and vary TRAIN_KEEP and every arm is scored on the
+                # SAME test set, so the only thing changing is how much
+                # target-base negative evidence training sees.
+                #
+                # Why it matters: moving 100% makes the target base vanish from
+                # training entirely (no positives -- held out -- and no negatives
+                # either), so the model ranks modified vs unmodified T having
+                # never seen a T-centred image. Measured that way, loco_5hmU is
+                # BELOW chance (A 0.478, C 0.482; best arm B only 0.526).
+                import zlib
+                def _h(i, tag):
+                    key = f"{tag}:{pool.contig[i]}:{int(pool.ref_pos[i])}".encode()
+                    return (zlib.crc32(key) & 0xffffffff) / 0xffffffff
+                _tf = float(os.environ.get('CTRL_TARGET_BASE_TEST_FRAC', '1'))
+                _tk = float(os.environ.get('CTRL_TARGET_BASE_TRAIN_KEEP', '1'))
+                if _tf < 1 or _tk < 1:
+                    cand = np.flatnonzero(mv)
+                    mv = np.zeros(len(tr_ctrl), dtype=bool)   # rebuild: move set
+                    drop = np.zeros(len(tr_ctrl), dtype=bool)  # dropped entirely
+                    for k in cand:
+                        i = int(tr_ctrl[k])
+                        if _h(i, 'c2t') < _tf:
+                            mv[k] = True
+                        elif _h(i, 'keep') >= _tk:
+                            drop[k] = True
+                    if drop.any():
+                        tr_ctrl = tr_ctrl[~drop]
+                        mv = mv[~drop]
+                        print(f"  [ctrl->test] test_frac={_tf} train_keep={_tk}: "
+                              f"dropped {int(drop.sum()):,} target-base control "
+                              f"images from training entirely", flush=True)
+                if mv.any():
+                    te_ctrl = np.sort(np.concatenate([te_ctrl, tr_ctrl[mv]]))
+                    tr_ctrl = tr_ctrl[~mv]
+                    print(f"  [ctrl->test] moved {int(mv.sum()):,} target-base "
+                          f"control images ({[b.decode() for b in bases]} in "
+                          f"{list(orgs)}) train->test; test negatives now "
+                          f"{len(te_ctrl):,}, train negatives {len(tr_ctrl):,}",
+                          flush=True)
+
+        # ORPHAN-BASE GUARD (LOCO_DROP_ORPHAN_BASE_NEGS=1)
+        # ------------------------------------------------------------------
+        # 5hmU and 6mA are each the ONLY modification in this corpus on their
+        # base (T and A). Holding one out therefore leaves training with that
+        # base present EXCLUSIVELY as negative evidence -- measured in the SPO1
+        # arms: bc01/bc02 controls are 48-50% T-centred with zero positives,
+        # while bc06 positives are 99.8% T. So loco_5hmU trains the rule
+        # "T is unmodified" and is then scored on modified T, which is why it
+        # sits at or below chance (0.481) rather than merely failing to
+        # transfer. loco_6mA has the identical structure for A.
+        #
+        # The C folds never hit this: 5mC/5hmC/4mC share the C base, so holding
+        # out one still leaves C positives from the others in training.
+        #
+        # With the guard on, training negatives at a base that has NO training
+        # positives are dropped. They stay in the TEST set, so the measurement
+        # is unchanged -- only the installed prior goes away.
+        if os.environ.get('LOCO_DROP_ORPHAN_BASE_NEGS', '0') == '1':
+            # A base counts as "covered" only if it carries a meaningful share
+            # of the training positives. loco_6mA has exactly 150 A-centred
+            # positives (SPO1 minus-strand reference-A images typed 5hmU) out
+            # of 126,091, and a bare `in` test let those 150 disable the guard
+            # for the fold that needed it most.
+            share = float(os.environ.get('ORPHAN_BASE_MIN_SHARE', '0.01'))
+            cnt = collections.Counter(refbase[pos_other].tolist())
+            tot = max(sum(cnt.values()), 1)
+            train_bases = {b for b, n in cnt.items() if n / tot >= share}
+            orphan = tuple(b for b in CHEM_BASES[chem_x] if b not in train_bases)
+            if orphan:
+                drop = np.array([refbase[i] in orphan for i in tr_ctrl], dtype=bool)
+                print(f"  [orphan-base guard] {chem_x} target base(s) "
+                      f"{[b.decode() for b in orphan]} have no training positives; "
+                      f"dropping {int(drop.sum()):,} of {len(tr_ctrl):,} training "
+                      f"negatives at those bases", flush=True)
+                tr_ctrl = tr_ctrl[~drop]
+            else:
+                print(f"  [orphan-base guard] {chem_x}: training already has "
+                      f"positives at every target base; no change", flush=True)
 
         train_idx = np.sort(np.concatenate([pos_other, tr_ctrl]))
         test_idx = np.sort(np.concatenate([pos_x, te_ctrl]))
@@ -644,7 +1242,18 @@ def main():
         # into stage-2 training, so a "held-out" chemistry is actually never
         # seen anywhere in training, not just absent from the core pool.
         leaky_orgs = {o for o, cs in BENCH_ORG_CHEMS.items() if chem_x in cs}
-        clean_extra = np.nonzero(is_bench & ~np.isin(bench_org_of, list(leaky_orgs)))[0].astype(np.int64)
+        if USE_STRANDRES:
+            # Per-image typing (see chem_array) means an organism carrying two
+            # chemistries keeps the one that is NOT held out: withholding 6mA no
+            # longer throws away E. coli's Dcm 5mC as collateral. Untyped BENCH
+            # images from a leaky organism are still dropped, since their
+            # chemistry is unresolved and could be the held-out one.
+            drop = is_bench & ((chem == chem_x)
+                               | (np.isin(bench_org_of, list(leaky_orgs))
+                                  & (chem == 'untyped')))
+            clean_extra = np.nonzero(is_bench & ~drop)[0].astype(np.int64)
+        else:
+            clean_extra = np.nonzero(is_bench & ~np.isin(bench_org_of, list(leaky_orgs)))[0].astype(np.int64)
         n_excluded = int(bench_idx.size - clean_extra.size)
         print(f"  train={len(train_idx):,} (pos_other={len(pos_other):,} "
               f"neg={len(tr_ctrl):,})  test={len(test_idx):,} "
@@ -656,8 +1265,11 @@ def main():
                   f"(of {len(bench_idx):,})", flush=True)
         if len(pos_x) == 0 or len(te_ctrl) == 0:
             raise SystemExit(f"empty test for {a.fold}: pos={len(pos_x)} neg={len(te_ctrl)}")
-        model = fit(train_idx, a.fold, 'loco', extra_idx=clean_extra)
-        record(model, f'zeroshot_{chem_x}', test_idx, held=chem_x)
+        if os.environ.get('FEWSHOT_K') is None:
+            model = fit(train_idx, a.fold, 'loco', extra_idx=clean_extra)
+            record(model, f'zeroshot_{chem_x}', test_idx, held=chem_x)
+        else:
+            _fewshot(chem_x, train_idx, test_idx)
 
     elif a.fold.startswith('subset_'):
         include_chems = subset_chems  # validated at top of main()
@@ -667,7 +1279,7 @@ def main():
 
         ctrl_idx = np.nonzero(neg_mask)[0]
         tr_ctrl, te_ctrl_all = pos_hash_split(pool, ctrl_idx, test_frac=0.15, seed=SPLIT_SEED)
-        pos_incl = np.nonzero(is_pos & np.isin(chem, include_chems))[0].astype(np.int64)
+        pos_incl = np.nonzero(is_pos & np.isin(chem, include_chems) & ~is_bench)[0].astype(np.int64)
         train_idx = np.sort(np.concatenate([pos_incl, tr_ctrl]))
         print(f"  train={len(train_idx):,} (pos_incl={len(pos_incl):,} neg={len(tr_ctrl):,})",
               flush=True)
@@ -678,7 +1290,7 @@ def main():
             te_ctrl = np.array([i for i in te_ctrl_all
                                 if org_of(pool.names[int(pool.file_of[i])]) in orgs
                                 and refbase[i] in bases], dtype=np.int64)
-            pos_x = np.nonzero(is_pos & (chem == chem_x))[0].astype(np.int64)
+            pos_x = np.nonzero(is_pos & (chem == chem_x) & ~is_bench)[0].astype(np.int64)
             test_idx = np.sort(np.concatenate([pos_x, te_ctrl]))
             if len(pos_x) == 0 or len(te_ctrl) == 0:
                 print(f"  WARNING: empty test for held-out {chem_x}: "
@@ -692,12 +1304,16 @@ def main():
         held_orgs = LOGO_GROUPS[group_x]
         held_mask = is_bench & np.isin(bench_org_of, held_orgs)
         test_idx = np.nonzero(held_mask)[0].astype(np.int64)
-        if group_x == 'bacteria':
-            # 100% positive without help (see BGCTRL_FILES docstring) -- add the
-            # non-motif background negatives, test-only, never trained on.
-            bg_idx = np.nonzero(is_bgctrl)[0].astype(np.int64)
+        bg_org_of = np.array([dataset_of(pool.names[int(pool.file_of[i])]) if is_bgctrl[i] else ''
+                              for i in range(pool.N)])
+        bg_mask = is_bgctrl & np.isin(bg_org_of, held_orgs)
+        if bg_mask.any():
+            # bacterial BENCH:: sets are 100% positive (see BGCTRL_FILES docstring) -- add the
+            # held-out organisms' non-motif background negatives, test-only, never trained on.
+            # For logo_bacteria this is every BGCTRL:: image, as before.
+            bg_idx = np.nonzero(bg_mask)[0].astype(np.int64)
             test_idx = np.sort(np.concatenate([test_idx, bg_idx]))
-            print(f"  logo_bacteria: +{len(bg_idx):,} BGCTRL:: background negatives "
+            print(f"  {a.fold}: +{len(bg_idx):,} BGCTRL:: background negatives "
                   f"added to test only", flush=True)
         extra_idx = np.nonzero(is_bench & ~held_mask)[0].astype(np.int64)
         core_idx = np.nonzero((is_pos | neg_mask) & ~is_bench & ~is_bgctrl)[0].astype(np.int64)

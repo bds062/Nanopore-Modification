@@ -70,6 +70,7 @@ Usage
 
 import os
 import sys
+import time
 import argparse
 import random
 from pathlib import Path
@@ -250,6 +251,41 @@ def _get_h5(path: str) -> h5py.File:
     return _H5_HANDLES[path]
 
 
+def _drop_h5(path: str) -> None:
+    """Forget (and close) this process's cached handle for path."""
+    hf = _H5_HANDLES.pop(path, None)
+    if hf is not None:
+        try:
+            hf.close()
+        except Exception:
+            pass
+
+
+def _h5_read(path: str, local_idx: int, attempts: int = 5):
+    """Read one image + label, retrying a transient filesystem error.
+
+    The feature files live on a shared NFS/Isilon mount. Under heavy concurrent
+    load (a whole LOCO battery streaming random reads at once) a read can come
+    back as OSError errno 5 even though the file is intact -- 14 of 18 training
+    jobs died that way on 2026-09-20, each on a different file, within minutes
+    of all starting together. Reopening the handle and retrying with a short
+    backoff turns that into a pause instead of a lost job.
+    """
+    for attempt in range(attempts):
+        try:
+            hf = _get_h5(path)
+            return (hf['tensors'][local_idx].astype(np.float32),
+                    float(hf['labels'][local_idx]))
+        except (OSError, KeyError) as e:
+            _drop_h5(path)
+            if attempt == attempts - 1:
+                raise
+            print(f"[pileup] read retry {attempt + 1}/{attempts - 1} on "
+                  f"{os.path.basename(path)}[{local_idx}]: {e}", file=sys.stderr,
+                  flush=True)
+            time.sleep(0.5 * 2 ** attempt)
+
+
 # ── dataset ───────────────────────────────────────────────────────────────────
 
 class PileupDataset(Dataset):
@@ -329,6 +365,12 @@ class PileupDataset(Dataset):
         # detection — a modification on an unseen base cannot be found via "which
         # base is this" if no base identity is available.
         self.mask_all_bases = mask_all_bases
+
+        # RAWMOD_DROP_CH9=1 : append ONLY the window_delta channel, not the
+        # center-base-only delta (ch9). Permutation importance shows ch9 is a net
+        # negative for 5hmU (redundant with window_delta) and it is the sole
+        # query-position-dependent input; dropping it yields a 10-channel model.
+        self.drop_ch9 = os.environ.get('RAWMOD_DROP_CH9', '0') == '1'
 
         if preload:
             self._preload_to_memory()
@@ -410,9 +452,7 @@ class PileupDataset(Dataset):
             file_idx, local_idx = self._resolve(global_idx)
 
             # Use per-process cached handle — safe for multiprocessing workers
-            hf = _get_h5(self.h5_paths[file_idx])
-            x  = hf['tensors'][local_idx].astype(np.float32)   # (H, W, C)
-            y  = float(hf['labels'][local_idx])
+            x, y = _h5_read(self.h5_paths[file_idx], local_idx)   # (H, W, C)
 
             x = np.transpose(x, (2, 0, 1))   # → (C, H, W)
 
@@ -452,23 +492,27 @@ class PileupDataset(Dataset):
         # the (potentially noised) raw signal channel the model sees.
         if self.delta_channels and self.samples_per_base > 0:
             L  = self.samples_per_base
-            ci = self._kmer_center if self.legacy_ch9_center else self.center_idx
-            cs, ce = ci * L, ci * L + L          # center base column slice
-
-            # Ch 9: per-read center-position delta broadcast across the full
-            # row — the deepmod analogue of DeepVariant's read_supports_variant.
-            # x[0, 0, cs:ce] = expected kmer level at center (reference row).
-            # x[0, 1:, cs:ce] = observed signal at center for each read.
-            ref_ctr  = float(x[0, 0, cs:ce].mean())
-            read_ctr = x[0, 1:, cs:ce].mean(axis=1)     # (H-1,)
-            ch9 = np.zeros((1, x.shape[1], x.shape[2]), dtype=np.float32)
-            ch9[0, 1:, :] = (read_ctr - ref_ctr)[:, np.newaxis]
 
             # Ch 10: full-window per-sample delta (observed minus expected).
             ch10 = np.zeros((1, x.shape[1], x.shape[2]), dtype=np.float32)
             ch10[0, 1:] = x[0, 1:] - x[0, 0]
 
-            x = np.concatenate([x, ch9, ch10], axis=0)  # (C+2, H, W)
+            if self.drop_ch9:
+                x = np.concatenate([x, ch10], axis=0)   # (C+1, H, W) — 10-channel
+            else:
+                ci = self._kmer_center if self.legacy_ch9_center else self.center_idx
+                cs, ce = ci * L, ci * L + L          # center base column slice
+
+                # Ch 9: per-read center-position delta broadcast across the full
+                # row — the deepmod analogue of DeepVariant's read_supports_variant.
+                # x[0, 0, cs:ce] = expected kmer level at center (reference row).
+                # x[0, 1:, cs:ce] = observed signal at center for each read.
+                ref_ctr  = float(x[0, 0, cs:ce].mean())
+                read_ctr = x[0, 1:, cs:ce].mean(axis=1)     # (H-1,)
+                ch9 = np.zeros((1, x.shape[1], x.shape[2]), dtype=np.float32)
+                ch9[0, 1:, :] = (read_ctr - ref_ctr)[:, np.newaxis]
+
+                x = np.concatenate([x, ch9, ch10], axis=0)  # (C+2, H, W)
 
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.float32)
 

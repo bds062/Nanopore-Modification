@@ -101,7 +101,12 @@ ONT_ROOT = '/fs/nexus-scratch/bds062/results'
 DATASETS = [
     # -- HP --
     dict(name='HP26695_WT_5kHz',
-        pod5='/fs/cbcb-scratch/bds062/data/benchmark/bacteria/HP26695_WT_5kHz/pod5',
+        # Original path (/fs/cbcb-scratch/.../data/benchmark/...) no longer
+        # exists -- this data now lives under cbcb-lab (matching
+        # refeaturize_benchmark.py's POD5_ROOT for every other curriculum
+        # organism); found when a from-scratch rerun of this script failed
+        # with "0 reads in pod5" for both HP26695 datasets.
+        pod5='/fs/cbcb-lab/storm/bds062/data/benchmark/bacteria/HP26695_WT_5kHz/pod5',
         bam='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/reads_refined.bam',
         peaks='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WT_5kHz/peaks_refined.tsv',
         level_table=RAWHASH2_LEVEL_TABLE,
@@ -109,7 +114,7 @@ DATASETS = [
         candidate='/fs/cbcb-scratch/bds062/data/gt/hpylori_26695/candidate.bed',
         extra=HP_COMMON, out='HP26695_WT_5kHz/features.h5'),
     dict(name='HP26695_WGA_5kHz',
-        pod5='/fs/cbcb-scratch/bds062/data/benchmark/bacteria/HP26695_WGA_5kHz/pod5',
+        pod5='/fs/cbcb-lab/storm/bds062/data/benchmark/bacteria/HP26695_WGA_5kHz/pod5',
         bam='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/reads_refined.bam',
         peaks='/fs/cbcb-scratch/bds062/results/benchmark_results/HP26695_WGA_5kHz/peaks_refined.tsv',
         level_table=RAWHASH2_LEVEL_TABLE,

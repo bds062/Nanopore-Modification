@@ -32,6 +32,7 @@ import h5py
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -241,11 +242,18 @@ def _sad_val_auroc(model, val_loader, device):
 
 
 def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=None,
-                    init_state=None):
+                    init_state=None, val_idx=None, keep_last=False):
     """init_state: optional state_dict to warm-start from (curriculum stage 2
-    resumes from stage 1's weights). None = fresh init (default)."""
+    resumes from stage 1's weights). None = fresh init (default).
+    val_idx: explicit validation set; when given, ALL of train_idx is trained on
+    and carve_val is skipped (few-shot: every shot site must reach training).
+    keep_last: return the final-epoch weights instead of best-by-val (few-shot:
+    val is donor replay, so best-by-val would favour the un-adapted weights)."""
     print(f"\n{'='*66}\n  TRAIN [{tag}]  train_images={len(train_idx):,}", flush=True)
-    sub_train, val_idx = carve_val(train_idx, group, hp.val_frac, hp.seed)
+    if val_idx is None:
+        sub_train, val_idx = carve_val(train_idx, group, hp.val_frac, hp.seed)
+    else:
+        sub_train = np.asarray(train_idx, dtype=np.int64)
     train_labels = group.labels[sub_train]
     n_pos, n_neg = int(train_labels.sum()), len(train_labels) - int(train_labels.sum())
     pw = torch.tensor(n_neg / max(n_pos, 1), dtype=torch.float32, device=device)
@@ -296,6 +304,18 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
     sad_on = getattr(model, 'sad_head', None) is not None
     sad_w = float(os.environ.get('SAD_WEIGHT', '1.0')) if sad_on else 0.0
     sad_eta = float(os.environ.get('SAD_ETA', '1.0'))
+    # SAD_LOSS=hinge swaps the unbounded inverse-distance push for a bounded
+    # one; 'inverse' (default) keeps the published behaviour exactly.
+    sad_loss = os.environ.get('SAD_LOSS', 'inverse')
+    # EPISODIC_BASE_DROPOUT=p : with probability p per batch, pick one of the
+    # four bases and drop every POSITIVE whose candidate base is that base from
+    # the loss (its negatives stay). The model then repeatedly trains under the
+    # exact condition loco_<CHEM> tests -- "detect a modification on a base for
+    # which you have seen no modified example" -- instead of meeting it for the
+    # first time at evaluation. Costs no new data.
+    epi_p = float(os.environ.get('EPISODIC_BASE_DROPOUT', '0'))
+    epi_rng = np.random.default_rng(hp.seed)
+    sad_margin = float(os.environ.get('SAD_MARGIN', '2.0'))
     if sad_on:
         model.eval(); acc = []; seen = 0
         with torch.no_grad():
@@ -311,7 +331,8 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
         c[c.abs() < 1e-6] = 1e-6              # no centre component exactly at 0
         model.sad_center.copy_(c.to(device))
         model.train()
-        print(f"  [DeepSAD] sad_dim={model.sad_dim} weight={sad_w} eta={sad_eta} "
+        print(f"  [DeepSAD] loss={sad_loss} margin={sad_margin} "
+              f"sad_dim={model.sad_dim} weight={sad_w} eta={sad_eta} "
               f"centre from {seen:,} normals  ||c||={c.norm():.3f}", flush=True)
 
     opt   = torch.optim.AdamW(model.parameters(), lr=hp.lr, weight_decay=hp.weight_decay)
@@ -328,7 +349,8 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for ep in range(1, hp.epochs + 1):
-        model.train(); t0 = time.time(); eloss = eseen = eadv = esup = esad = 0
+        model.train(); t0 = time.time(); eloss = eseen = eadv = esup = esad = eabase = 0
+        nepi = 0
         for x, y in train_loader:
             x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
             opt.zero_grad()
@@ -341,19 +363,58 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
             #                computed here because it needs the batch labels y.
             if isinstance(out, tuple):
                 logit, aux = out
-                loss = bce_w * crit(logit.squeeze(1), y)
+                keep = None
+                if epi_p > 0 and float(epi_rng.random()) < epi_p:
+                    # candidate base = reference row, window centre
+                    Wp = getattr(model, 'Wp', None)
+                    if Wp:
+                        L = x.shape[3] // Wp
+                        cs = (Wp // 2) * L
+                        cb = x[:, 2:6, 0, cs:cs + L].mean(dim=2).argmax(dim=1)
+                        drop = int(epi_rng.integers(0, 4))
+                        keep = ~((y > 0.5) & (cb == drop))
+                        if keep.sum() < 8:          # degenerate batch; skip
+                            keep = None
+                if keep is None:
+                    loss = bce_w * crit(logit.squeeze(1), y)
+                else:
+                    per = F.binary_cross_entropy_with_logits(
+                        logit.squeeze(1), y, pos_weight=pw, reduction='none')
+                    loss = bce_w * (per * keep.float()).sum() / keep.float().sum()
+                    nepi += 1
                 if 'adv_loss' in aux:
                     loss = loss + aux['adv_loss']
                     eadv += float(aux['adv_loss']) * len(y)
+                if 'aux_base_loss' in aux:
+                    # Rockfish signal->base task. Already weighted inside the
+                    # model by AUX_BASE_WEIGHT, so it is added straight on.
+                    loss = loss + aux['aux_base_loss']
+                    eabase += float(aux['aux_base_loss']) * len(y)
                 if 'proj' in aux and supcon_w > 0:
-                    sc = supcon_crit(aux['proj'], y.long())
+                    pj, yy = ((aux['proj'], y) if keep is None
+                              else (aux['proj'][keep], y[keep]))
+                    sc = supcon_crit(pj, yy.long())
                     loss = loss + supcon_w * sc
                     esup += float(sc) * len(y)
                 if 'sad' in aux and sad_w > 0:
-                    d2 = ((aux['sad'] - model.sad_center) ** 2).sum(1)
-                    nmask = (y == 0); amask = (y == 1)
+                    sad_e = aux['sad'] if keep is None else aux['sad'][keep]
+                    y_s = y if keep is None else y[keep]
+                    d2 = ((sad_e - model.sad_center) ** 2).sum(1)
+                    nmask = (y_s == 0); amask = (y_s == 1)
                     ln = d2[nmask].mean() if nmask.any() else d2.new_zeros(())
-                    la = (1.0 / (d2[amask] + 1e-6)).mean() if amask.any() else d2.new_zeros(())
+                    if sad_loss == 'hinge':
+                        # Bounded push. The original 1/d^2 term has no ceiling:
+                        # it keeps rewarding moving an already-distant anomaly
+                        # further, so a handful of easy positives can dominate
+                        # the gradient and the representation never has to
+                        # organise anything finer. A hinge stops paying once a
+                        # positive is SAD_MARGIN away from the centre, which is
+                        # all the one-class geometry actually needs.
+                        d = (d2[amask] + 1e-6).sqrt() if amask.any() else d2.new_zeros(())
+                        la = (torch.relu(sad_margin - d) ** 2).mean() if amask.any() \
+                            else d2.new_zeros(())
+                    else:
+                        la = (1.0 / (d2[amask] + 1e-6)).mean() if amask.any() else d2.new_zeros(())
                     sadl = ln + sad_eta * la
                     loss = loss + sad_w * sadl
                     esad += float(sadl) * len(y)
@@ -384,8 +445,10 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
         adv_str = f"adv_ce={eadv/max(eseen,1):.4f}  " if eadv else ""
         sup_str = f"supcon={esup/max(eseen,1):.4f}  " if esup else ""
         sad_str = f"sad={esad/max(eseen,1):.4f}  " if esad else ""
+        ab_str = f"base={eabase/max(eseen,1):.4f}  " if eabase else ""
+        ab_str += f"epi={nepi}  " if nepi else ""
         sel_label = "val_anomAUROC" if (bce_w == 0 and sad_on) else "val_AUPRC"
-        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  {adv_str}{sup_str}{sad_str}"
+        print(f"  ep {ep:3d}/{hp.epochs}  tr_loss={tr_loss:.4f}  {adv_str}{sup_str}{sad_str}{ab_str}"
               f"{sel_label}={vauprc:.4f}  lr={opt.param_groups[0]['lr']:.2e}  "
               f"{time.time()-t0:.1f}s", flush=True)
         _wandb_log({f'{tag}/train_loss': tr_loss, f'{tag}/val_auprc': vauprc,
@@ -401,8 +464,13 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
                 print(f"  early stop @ ep {ep}", flush=True); break
 
     _wandb_log({f'{tag}/best_val_auprc': best_auprc, f'{tag}/best_epoch': best_ep})
+    if keep_last:
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        best_ep = ep
+        print(f"  [keep_last] returning final-epoch weights (ep {ep})", flush=True)
     model.load_state_dict(best_state)
-    torch.save({'model_state': best_state, 'in_channels': 11,
+    _in_ch = 10 if os.environ.get('RAWMOD_DROP_CH9', '0') == '1' else 11
+    torch.save({'model_state': best_state, 'in_channels': _in_ch,
                 'val_auprc': best_auprc, 'epoch': best_ep, 'tag': tag},
                run_dir / 'best_model.pt')
     np.savez(run_dir / 'history.npz', train_loss=tr_hist, val_auprc=ap_hist, best_epoch=best_ep)
@@ -412,12 +480,17 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
     return model
 
 
+LAST_EVAL = None   # (y_true, y_score) of the most recent evaluate() call
+
+
 def evaluate(model, group, test_idx, device, hp):
     ds = make_ds(group, test_idx, False, hp)
     loader = DataLoader(ds, shuffle=False, **make_loader_kwargs(hp.batch, hp.num_workers, device, _wif))
     yt, yp = run_inference(model, loader, device)
     keys = group.source_keys(test_idx)
     t, p, _ = aggregate_by_position(yt, yp, keys)
+    global LAST_EVAL
+    LAST_EVAL = (np.asarray(t), np.asarray(p))
     return compute_metrics(t, p)
 
 

@@ -49,7 +49,7 @@ for _p in (REPO / 'scripts' / 'train', REPO / 'scripts' / 'test', REPO / 'rawmod
 import run_pipeline as R                        # noqa: E402
 from score_genome import load_model              # noqa: E402
 
-PYTHON = '/fs/nexus-scratch/bds062/envs/mod/bin/python'
+PYTHON = sys.executable    # featurize with the same interpreter/env running this script
 FEATURIZE = str(REPO / 'rawmod' / 'featurization.py')
 DEFAULT_LEVEL_TABLE = ('/fs/nexus-scratch/bds062/rawhash2-env/rawhash2-storm/'
                        'extern/local_kmer_models/uncalled_r1041_model_only_means.txt')
@@ -96,6 +96,12 @@ def main():
                          'aggregated back to one score per site at eval time)')
     ap.add_argument('--strand', choices=['both', '+', '-'], default='+')
     ap.add_argument('--min-mapq', type=int, default=0)
+    ap.add_argument('--normalize', action='store_true',
+                    help='pass --normalize (per-read MAD scaling) to featurization.py. '
+                         'The strand-resolved BENCH/SPO1/ONT training features were '
+                         'built WITH it (h5 attr normalization=MAD); without it the '
+                         'images are z-scored instead, which does not match those '
+                         'checkpoints.')
     ap.add_argument('--half-window', type=int, default=10)
     ap.add_argument('--L', type=int, default=10)
     ap.add_argument('--skip-featurize', action='store_true',
@@ -128,8 +134,14 @@ def main():
             '--half-window', str(a.half_window),
             '--L', str(a.L),
         ]
+        if a.strand == '-':
+            # minus-strand training images were mirrored into read orientation
+            # (refeaturize_strand_resolved.py); score them the same way
+            cmd += ['--orient', 'read']
         if a.max_images_per_base:
             cmd += ['--max-images-per-base', str(a.max_images_per_base)]
+        if a.normalize:
+            cmd += ['--normalize']
         print('[test_external_sites] featurizing: ' + ' '.join(cmd), flush=True)
         if a.dry_run:
             return

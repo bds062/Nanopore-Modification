@@ -66,29 +66,37 @@ DEPENDENCY_ARG=""
 if [ -n "${DEPENDENCY:-}" ]; then
     DEPENDENCY_ARG="--dependency=${DEPENDENCY_TYPE:-afterok}:${DEPENDENCY}"
 fi
+# BEGIN: hold these jobs until a time SLURM understands (e.g. "now+40minutes").
+# Used to stagger a multi-run battery: 18 jobs starting at once all stream random
+# reads from the same NFS feature files and that triggered errno-5 read failures.
+BEGIN_ARG=""
+if [ -n "${BEGIN:-}" ]; then BEGIN_ARG="--begin=${BEGIN}"; fi
 if [ "${PARTITION}" == "scavenger" ]; then
     SLURM_COMMON="--partition=scavenger --account=scavenger --qos=scavenger \
---gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} --ntasks=1 --cpus-per-task=10 --mem=48G --time=${TIME_LIMIT:-12:00:00}"
+--gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} ${BEGIN_ARG} --ntasks=1 --cpus-per-task=${CPUS:-10} --mem=48G --time=${TIME_LIMIT:-12:00:00}"
 else
     # GRES respects GPU_TYPE same as the scavenger branch above (was hardcoded
     # to rtxa5000 only, which stranded jobs when cbcb26 -- the ONLY rtxa5000
     # node on this partition -- was unavailable, while cbcb27 (rtxa6000) and
     # cbcb28-29 (rtx6000ada) sat idle because nothing could request them).
     SLURM_COMMON="--partition=cbcb --account=cbcb --qos=high \
---gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} --ntasks=1 --cpus-per-task=10 --mem=48G --time=${TIME_LIMIT:-12:00:00}"
+--gres=${GRES} ${EXCLUDE_ARG} ${DEPENDENCY_ARG} ${BEGIN_ARG} --ntasks=1 --cpus-per-task=${CPUS:-10} --mem=48G --time=${TIME_LIMIT:-12:00:00}"
 fi
 
 submit() { if ${DRY_RUN}; then echo "[dry-run] sbatch $*" >&2; echo 9999; else eval "sbatch --parsable $*"; fi; }
 
 echo "=== rawmod_matched_loco  ->  ${OUTDIR}   epochs=${EPOCHS_ARG:-default}  seed=${SEED_ARG:-default}  dry=${DRY_RUN}  partition=${PARTITION} ==="
 for FOLD in "${FOLDS[@]}"; do
-    WRAP="${CONDA_INIT} && PILEUP_PRELOAD=0 PILEUP_WORKERS=8 \
+    WRAP="${CONDA_INIT} && PILEUP_PRELOAD=0 PILEUP_WORKERS=${PILEUP_WORKERS:-8} \
 PILEUP_MASK_BASES=${PILEUP_MASK_BASES:-0} \
 SUPCON_DIM=${SUPCON_DIM:-128} SUPCON_WEIGHT=${SUPCON_WEIGHT:-0.1} SUPCON_TEMP=${SUPCON_TEMP:-0.07} \
 CURRICULUM=${CURRICULUM:-0} CURRICULUM_EPOCHS=${CURRICULUM_EPOCHS:-15} \
 SAD_DIM=${SAD_DIM:-0} SAD_WEIGHT=${SAD_WEIGHT:-1.0} SAD_ETA=${SAD_ETA:-1.0} \
 BCE_WEIGHT=${BCE_WEIGHT:-1.0} \
 RAWMOD_DATA_GEN=${RAWMOD_DATA_GEN:-} EXTRA_ORGANISMS=${EXTRA_ORGANISMS:-0} \
+INCLUDE_HUMAN=${INCLUDE_HUMAN:-0} TF_LAYERS=${TF_LAYERS:-2} ROW_EMB=${ROW_EMB:-1} \
+RAWMOD_STRANDRES_ROOT=${RAWMOD_STRANDRES_ROOT:-/fs/cbcb-lab/storm/bds062/rawmod_strand_resolved/features} \
+RAWMOD_DROP_CH9=${RAWMOD_DROP_CH9:-0} \
 ${PYTHON} ${DRIVER} --fold ${FOLD} --out-dir ${OUTDIR} ${EPOCHS_ARG} ${SEED_ARG}"
     JID=$(submit "${SLURM_COMMON} --job-name=mloco_${FOLD} \
         --output=${LOGDIR}/${FOLD}_%j.out --error=${LOGDIR}/${FOLD}_%j.out \
