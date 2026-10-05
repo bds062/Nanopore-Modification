@@ -752,6 +752,12 @@ def main():
                              'Use this for biological datasets to avoid mislabeling '
                              'ambiguous/unobserved sites as negative. (default: all '
                              'eligible positions are emitted)')
+    parser.add_argument('--read-select', default=None, metavar='NPZ',
+                        help='Benchmark read selection (test/benchmark/bench/readsel.py): a read '
+                             'contributes to a position only where the selection picked it, so '
+                             'every image is built from the same K reads every other tool is '
+                             'scored on. Use with --min-reads 1 and --max-reads >= K. '
+                             '(default: off)')
     parser.add_argument('--exclude-bed', default=None,
                         help='BED file (chrom, start, end; 0-based half-open) of '
                              'genomic regions to hold out entirely: candidate/gt '
@@ -963,6 +969,25 @@ def main():
         print("No --level-table supplied; reference row channel 0 will be 0.",
               file=sys.stderr)
 
+    read_select = None
+    if args.read_select:
+        z = np.load(args.read_select)
+        _ids, _ctg = z['read_ids'], z['contigs']
+        read_select = collections.defaultdict(list)
+        for r, c, a, b in zip(z['sel_read'], z['sel_contig'], z['sel_start'], z['sel_end']):
+            read_select[str(_ids[r])].append((str(_ctg[c]), int(a), int(b)))
+        read_select = {k: (v[0][0], np.array([x[1] for x in v]), np.array([x[2] for x in v]))
+                       for k, v in read_select.items()}
+        print(f"Read selection {args.read_select}: {len(read_select):,} reads "
+              f"(K={int(z['k'])}, seed={int(z['seed'])})", file=sys.stderr)
+
+    def _selected(read_id, ref_name, rpos):
+        sel = read_select.get(read_id)
+        if sel is None or sel[0] != ref_name:
+            return False
+        j = int(np.searchsorted(sel[1], rpos, side='right')) - 1
+        return j >= 0 and rpos < sel[2][j]
+
     # ── pass 1: collect per-read segment dicts per reference position ─────────
     # pos_reads[(ref_name, ref_pos)]    = list of seg_dicts
     # pos_ref_context[(ref_name)]       = dict of ref_pos -> base (all covered pos)
@@ -1027,6 +1052,8 @@ def main():
 
                 key = (ref_name, rpos)
                 if candidate_set is not None and key not in candidate_set:
+                    continue
+                if read_select is not None and not _selected(read_id, ref_name, rpos):
                     continue
                 if key not in pos_refbase:
                     pos_refbase[key] = ref_base
@@ -1244,6 +1271,7 @@ def main():
         hf.attrs['ref_row']       = 'row_0'
         hf.attrs['label_semantics'] = 'binary_modified_vs_unmodified'
         hf.attrs['read_order']    = 'haplotype_then_alignment_start'
+        hf.attrs['read_select']   = str(args.read_select or '')
         hf.attrs['multi_image']   = True
         hf.attrs['partition']     = 'random_nonoverlapping_chunks_sorted_by_read_order'
         if args.level_table:

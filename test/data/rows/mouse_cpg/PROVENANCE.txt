@@ -1,0 +1,3 @@
+built by bench.bisulfite_rows from mouse_brain_bisulfite_chr1_20x.tsv (ontbasemod)
+context cpg; coverage >= 20; positive frac >= 0.9; negative frac <= 0.1; both strands; restricted to mouse scorable span (K=10, seed=0, min_qs=10)
+98,643 positives, 10,969 negatives, 81,625 intermediate dropped; reference base C/G at 100.0% of labelled positions

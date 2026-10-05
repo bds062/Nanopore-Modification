@@ -1,0 +1,26 @@
+# One line per model column (subtool). family = adapter in bench/adapters/<family>.py; arg = what that adapter needs
+# (Dorado: the modification model in $DORADO_MODELS; UniMeth: 'checkpoint;flags;frequency', ${KEY} = setting KEY;
+# MethyNano: the species checkpoint folder; RawMod: see config/rawmod_models.tsv).
+# UniMeth: the released 5 kHz models, run at --frequency 5khz.
+# unimeth_r81_* (UniMeth-FT in the paper): UniMeth fine-tuned from the released 5 kHz models with labels only at the
+# positions the released RawMod model trained on (evaluation/train_unimeth_ft.sh), run with the patched source
+# (patches/unimeth-11215d4-finetune.patch) and --frequency 4khz, as trained.
+# codes = which per-read modification codes count as "modified" for this column (comma-separated; * = any).
+# bases = + strand bases the subtool has a model for; context = cpg (CpG-only model) or any. A subtool is N/A on a
+# row whose modified base it does not model, or (context cpg) on a non-CpG row; it is never scored there.
+#subtool	family	arg	codes	bases	context
+dorado_6mA	dorado	dna_r10.4.1_e8.2_400bps_sup@v5.0.0_6mA@v3	a	A	any
+dorado_4mC_5mC	dorado	dna_r10.4.1_e8.2_400bps_sup@v5.0.0_4mC_5mC@v3	*	C	any
+dorado_5mC_5hmC	dorado	dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mC_5hmC@v3	*	C	any
+dorado_5mCG_5hmCG	dorado	dna_r10.4.1_e8.2_400bps_sup@v5.0.0_5mCG_5hmCG@v3	*	C	cpg
+unimeth_5mC	unimeth	${UNIMETH_CHECKPOINTS}/unimeth_r10.4.1_5kHz_5mC.pt;--5mCpG 1 --5mCHG 1 --5mCHH 1;5khz	*	C	any
+unimeth_6mA	unimeth	${UNIMETH_CHECKPOINTS}/unimeth_r10.4.1_5kHz_6mA.pt;--6mA 1;5khz	*	A	any
+deepmod2	deepmod2	-	*	C	cpg
+rockfish	rockfish	-	*	C	cpg
+methynano_Hsapiens	methynano	H.sapiens	*	C	any
+methynano_Athaliana	methynano	A.thaliana	*	C	any
+methynano_Osativa	methynano	O.sativa	*	C	any
+rawmod	rawmod	checkpoints/rawmod_final/mixed.pt	*	ACGT	any
+unimeth_r81_5hmC	unimeth_r81	${UNIMETH_FT_CHECKPOINTS}/5hmC/final.pt;--cpg 1 --chg 1 --chh 1;4khz	*	C	any
+unimeth_r81_4mC	unimeth_r81	${UNIMETH_FT_CHECKPOINTS}/4mC/final.pt;--cpg 1 --chg 1 --chh 1;4khz	*	C	any
+unimeth_r81_5hmU	unimeth_r81	${UNIMETH_FT_CHECKPOINTS}/5hmU/final.pt;--hmU 1;4khz	*	T	any

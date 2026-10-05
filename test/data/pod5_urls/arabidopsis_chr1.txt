@@ -1,0 +1,5 @@
+s3://ont-basemod-benchmark-data/Raw/pod5/plants/Arabidopsis/PAY31610_a59242c7_3f4cbcc0_0.pod5
+s3://ont-basemod-benchmark-data/Raw/pod5/plants/Arabidopsis/PAY31610_a59242c7_3f4cbcc0_1.pod5
+s3://ont-basemod-benchmark-data/Raw/pod5/plants/Arabidopsis/PAY31610_a59242c7_3f4cbcc0_10.pod5
+s3://ont-basemod-benchmark-data/Raw/pod5/plants/Arabidopsis/PAY31610_a59242c7_3f4cbcc0_11.pod5
+s3://ont-basemod-benchmark-data/Raw/pod5/plants/Arabidopsis/PAY31610_a59242c7_3f4cbcc0_12.pod5

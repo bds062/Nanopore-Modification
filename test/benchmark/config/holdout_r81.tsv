@@ -1,0 +1,24 @@
+# Benchmark sample -> regex over training-pool file names of the same organism (bench.holdout, BENCH_HOLDOUT=r81).
+# HG002 is also matched against HG001: same reference coordinates and sequence context. mouse and rice_w: never trained.
+#sample	pool_file_regex
+syn_5mC	^ONT::
+syn_5hmC	^ONT::
+syn_6mA	^ONT::
+syn_control	^ONT::
+spo1_bc01	^SPO1::
+spo1_bc07	^SPO1::
+hp26695	^HP::
+hp26695_wga	^HP::
+ecoli_wt_w1m	^BENCH::Ecoli_
+ecoli_dm_w1m	^BENCH::Ecoli_
+ecoli_mssi_w1m	^BENCH::Ecoli_
+anabaena	^BENCH::Anabaena
+hpj99	^BENCH::HPJ99
+arabidopsis_chr1	^BENCH::arabidopsis
+hg002	^BENCH::hg00[12]
+# rep2: unseen library, but the oligo positions are the rep1 training positions -> strict holdout keeps the same 32+32 as rep1
+syn_5mC_rep2	^ONT::
+syn_5hmC_rep2	^ONT::
+syn_6mA_rep2	^ONT::
+syn_control_rep2	^ONT::
+tdenticola	^BENCH::Tdenticola

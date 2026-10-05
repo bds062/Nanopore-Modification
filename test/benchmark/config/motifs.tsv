@@ -1,0 +1,8 @@
+# Motif rows built from the reference (bench.motif_rows). offset = 0-based index of the modified base in the motif.
+#row	ref_sample	motif	offset	design
+ecoli_dam_6mA_ko	ecoli_wt_w1m	GATC	1	two
+ecoli_dcm_5mC_ko	ecoli_wt_w1m	CCWGG	1	two
+ecoli_mssi_5mC_ko	ecoli_mssi_w1m	CG	0	two
+anabaena_6mA	anabaena	GATC	1	one
+hp26695_4mC	hp26695	TCTTC	1	two
+hp26695_6mA	hp26695	GCATG	2	two

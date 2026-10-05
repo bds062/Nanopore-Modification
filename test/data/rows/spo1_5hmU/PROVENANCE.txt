@@ -1,0 +1,1 @@
+gt = cand: thymine positions of SPO1 (FJ230960.1), either strand (79,584); positives in the native library (spo1_bc07, every T is 5hmU), negatives at the same positions in the PCR library (spo1_bc01)

@@ -1,0 +1,6 @@
+motif	kmer	offset	genome_occurrences	call_rate	calls_explained	used
+GGCC[C]	GGCCC	4	2041	0.998	2036	yes
+GGGC[C]	GGGCC	4	2041	0.994	2029	yes
+[C]TCTTC	CTCTTC	0	1695	0.998	1690	yes
+GGAC[C]	GGACC	4	881	0.995	876	yes
+GGTC[C]	GGTCC	4	881	0.997	876	yes

@@ -1,0 +1,1 @@
+identical to rows/syn_5mC (same oligonucleotide positions); scored on the replicate-2 libraries

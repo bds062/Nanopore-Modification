@@ -1,0 +1,1 @@
+gt: the designed 6mA positions of ONT modbase-validation_2024.10 (all_5mers_6mA_sites.bed); cand = gt (type-two row: negatives are the same positions in syn_control)

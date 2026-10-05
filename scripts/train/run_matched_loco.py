@@ -305,6 +305,21 @@ LOGO_GROUPS = {
     'anabaena':   ['Anabaena_WT_5kHz'],
     'tdenticola': ['Tdenticola_WT_5kHz'],
     'hpj99':      ['HPJ99_WT_5kHz'],
+    # PacBio-truth library holdout (Kulkarni et al. used per-site ipdSummary calls for these two): both 4mC/6mA
+    # bacteria with PacBio data leave training together; HP26695 4mC/6mA stay in, so this is not a LOCO fold
+    'j99tden':    ['HPJ99_WT_5kHz', 'Tdenticola_WT_5kHz'],
+}
+# Core-pool genome holdouts (benchmark comparison): every image of these organisms
+# (org_of prefix, all libraries and strands) is removed from training and used as
+# the fold's test set. The extra organisms (BENCH::) stay in stage-2 training.
+LOGO_CORE_GROUPS = {
+    'hp26695': ['HP::'],      # H. pylori 26695 WT + WGA (only 4mC source in the core)
+    'ont':     ['ONT::'],     # ONT synthetic oligos (only 5hmC source)
+    # one benchmark row each: the row's modified oligo library + the shared control
+    'ont5mC':  ['ONT::5mC|', 'ONT::control|'],
+    'ont5hmC': ['ONT::5hmC|', 'ONT::control|'],
+    'ont6mA':  ['ONT::6mA|', 'ONT::control|'],
+    'spo1':    ['SPO1::'],    # SPO1 native + amplicon barcodes (only 5hmU source)
 }
 
 # The 6 bacterial BENCH:: datasets are 100% positive (no negatives -- see
@@ -351,6 +366,22 @@ def build_members_strandres():
                 m[f'ONT::{mod}|{strand}'] = _sr(f, strand)
         for bc, f in sr_bc.items():
             m[f'SPO1::{bc}|{strand}'] = _sr(f, strand)
+        # SPO1_OTHERMODS_DIR (diagnostic): native bc06/bc07 sites that modkit typed
+        # 6mA/5mC/5hmC (base-consistent), featurized as positives -- the SPO1
+        # content the pre-strand-resolved pool carried. Typed through mod_map.
+        _om = os.environ.get('SPO1_OTHERMODS_DIR', '')
+        if _om:
+            for bc, f in (('bc06om', 'barcode06'), ('bc07om', 'barcode07')):
+                tag = 'plus' if strand == '+' else 'minus'
+                m[f'SPO1::{bc}|{strand}'] = os.path.join(_om, f'{f}_om_{tag}.h5')
+        # SPO1_OTHERMODS_RAW_DIR (diagnostic): the base-INCONSISTENT modkit calls the
+        # old pool also kept (e.g. C/G sites typed 6mA, A sites typed 5mC). Exempt from
+        # the base invariant below so they keep those labels, as results17 did.
+        _omr = os.environ.get('SPO1_OTHERMODS_RAW_DIR', '')
+        if _omr:
+            for bc, f in (('bc06omraw', 'barcode06'), ('bc07omraw', 'barcode07')):
+                tag = 'plus' if strand == '+' else 'minus'
+                m[f'SPO1::{bc}|{strand}'] = os.path.join(_omr, f'{f}_omraw_{tag}.h5')
         m[f'HP::WT|{strand}'] = _sr('HP26695_WT_5kHz', strand)
         m[f'HP::WGA|{strand}'] = _sr('HP26695_WGA_5kHz', strand)
         if USE_EXTRA_ORGS:
@@ -536,6 +567,8 @@ def chem_array(group, mod_map, refbase):
     n_bad = 0
     for i in np.nonzero(modified)[0]:
         want = _BASE_OF.get(chem[i])
+        if 'omraw' in group.names[int(group.file_of[i])]:
+            continue                        # diagnostic: keep old base-inconsistent labels
         if want is not None and refbase[i] != want:
             chem[i] = 'untyped'; n_bad += 1
     if n_bad:
@@ -651,7 +684,8 @@ def main():
                          'Used to sanity-check a new data generation before burning GPU hours.')
     a = ap.parse_args()
 
-    valid = ['mixed', 'all'] + [f'loco_{c}' for c in CHEMS] + [f'logo_{g}' for g in LOGO_GROUPS]
+    valid = ['mixed', 'all'] + [f'loco_{c}' for c in CHEMS] + [f'logo_{g}' for g in LOGO_GROUPS] \
+            + [f'logo_{g}' for g in LOGO_CORE_GROUPS]
     subset_chems = parse_subset_fold(a.fold)
     if a.fold not in valid and subset_chems is None:
         raise SystemExit(f"--fold must be one of {valid}, or subset_<chem>+<chem>[+...] "
@@ -981,7 +1015,8 @@ def main():
         if R.LAST_EVAL is not None:                 # per-position scores for bootstrap CIs
             sdir = out / 'scores'; sdir.mkdir(parents=True, exist_ok=True)
             yt_, yp_ = R.LAST_EVAL
-            np.savez_compressed(sdir / f'{a.fold}__{test_name}.npz', y_true=yt_, y_score=yp_)
+            np.savez_compressed(sdir / f'{a.fold}__{test_name}.npz', y_true=yt_, y_score=yp_,
+                                source_file=R.LAST_EVAL_FILES)
         sad_msg = f" auroc_sad={m['auroc_sad']:.3f}" if 'auroc_sad' in m else ""
         print(f"  EVAL {test_name}: mod_f1={m['mod_f1']:.3f} mod_rec={m['mod_rec']:.3f} "
               f"mod_prec={m['mod_prec']:.3f} auprc={m['auprc']:.3f} "
@@ -1199,6 +1234,25 @@ def main():
                           f"{len(te_ctrl):,}, train negatives {len(tr_ctrl):,}",
                           flush=True)
 
+        # LOCO_DROP_NATIVE=bc06,bc07 (diagnostic)
+        # ------------------------------------------------------------------
+        # Remove every TRAINING image (negatives and other-chemistry positives)
+        # drawn from the listed SPO1 datasets. In native SPO1 every T is 5hmU, so
+        # any image from those reads carries the held-out mark in its window
+        # whatever its centre label; loco_5hmU is zero-shot only if training never
+        # sees them. The test set is untouched.
+        _dn = os.environ.get('LOCO_DROP_NATIVE', '')
+        if _dn:
+            _dset = {x.strip() for x in _dn.split(',') if x.strip()}
+            def _native(i):
+                nm = pool.names[int(pool.file_of[i])]
+                return nm.startswith('SPO1::') and dataset_of(nm) in _dset
+            _kc = np.array([not _native(i) for i in tr_ctrl], dtype=bool)
+            _kp = np.array([not _native(i) for i in pos_other], dtype=bool)
+            print(f"  [drop-native] {sorted(_dset)}: removed {int((~_kc).sum()):,} negatives "
+                  f"and {int((~_kp).sum()):,} positives from training", flush=True)
+            tr_ctrl, pos_other = tr_ctrl[_kc], pos_other[_kp]
+
         # ORPHAN-BASE GUARD (LOCO_DROP_ORPHAN_BASE_NEGS=1)
         # ------------------------------------------------------------------
         # 5hmU and 6mA are each the ONLY modification in this corpus on their
@@ -1303,6 +1357,21 @@ def main():
                 continue
             R.assert_disjoint(train_idx, test_idx, pool, f'{a.fold}:{chem_x}')
             record(model, f'zeroshot_{chem_x}', test_idx, held=chem_x)
+
+    elif a.fold.startswith('logo_') and a.fold[len('logo_'):] in LOGO_CORE_GROUPS:
+        group_x = a.fold[len('logo_'):]
+        _pref = tuple(LOGO_CORE_GROUPS[group_x])     # member-name prefixes
+        _held_f = np.array([n.startswith(_pref) for n in pool.names])
+        held_core = _held_f[np.asarray(pool.file_of, dtype=np.int64)] & ~is_bench & ~is_bgctrl
+        test_idx = np.nonzero(held_core & (is_pos | neg_mask))[0].astype(np.int64)
+        core_idx = np.nonzero((is_pos | neg_mask) & ~is_bench & ~is_bgctrl & ~held_core)[0].astype(np.int64)
+        extra_idx = np.nonzero(is_bench)[0].astype(np.int64)
+        R.assert_disjoint(core_idx, test_idx, pool, a.fold)
+        print(f"  train core={len(core_idx):,} extra={len(extra_idx):,}  test({group_x})="
+              f"{len(test_idx):,} (pos={int(is_pos[test_idx].sum()):,} "
+              f"neg={int((~is_pos[test_idx]).sum()):,})", flush=True)
+        model = fit(core_idx, a.fold, 'logo', extra_idx=extra_idx)
+        record(model, f'zeroshot_{group_x}', test_idx, held=group_x)
 
     elif a.fold.startswith('logo_'):  # leave-one-organism-group-out
         group_x = a.fold[len('logo_'):]

@@ -1,0 +1,320 @@
+diff --git a/unimeth/config/args_config.py b/unimeth/config/args_config.py
+index 4b4a51b..96c2a5f 100644
+--- a/unimeth/config/args_config.py
++++ b/unimeth/config/args_config.py
+@@ -142,6 +142,10 @@ Model Types:
+         parser.add_argument('--chg', type=int, default=0, help='Enable CHG detection (1=yes)')
+         parser.add_argument('--chh', type=int, default=0, help='Enable CHH detection (1=yes)')
+         parser.add_argument('--m6A', type=int, default=0, help='Enable m6A detection (1=yes)')
++        parser.add_argument('--hmU', type=int, default=0, help='Enable 5hmU detection at every T (1=yes)')
++        # label patch (5hmC/4mC)
++        parser.add_argument('--hmC', type=int, default=0, help='Labels from C+h tags: 5hmC at the C context sites (1=yes)')
++        parser.add_argument('--m4C', type=int, default=0, help='Labels from C+21839 tags: 4mC at the C context sites (1=yes)')
+     
+     # Fine-tuning specific
+     if mode in ['finetune', 'calibration']:
+diff --git a/unimeth/config/model_config.py b/unimeth/config/model_config.py
+index ddf1552..7d9cc6a 100644
+--- a/unimeth/config/model_config.py
++++ b/unimeth/config/model_config.py
+@@ -22,7 +22,7 @@ warnings.simplefilter(action='ignore', category=UserWarning)
+ # Vocabulary (fixed)
+ VOCAB = ['[PAD]', '[START]', '[END]', 'A', 'G', 'T', 'C', 
+          '[CpG]', '[CHG]', '[CHH]', '+', '-', '[MASK]', '[m6A]', 
+-         '[R10]', '[4khz]', '[5khz]']
++         '[R10]', '[4khz]', '[5khz]', '[5hmU]']
+ 
+ # Token mappings (fixed)
+ TOKENIZER = {v: i for i, v in enumerate(VOCAB)}
+@@ -31,6 +31,7 @@ METHYLATION_TOKENS = {
+     '[CHG]': TOKENIZER['[CHG]'],
+     '[CHH]': TOKENIZER['[CHH]'],
+     '[m6A]': TOKENIZER['[m6A]'],
++    '[5hmU]': TOKENIZER['[5hmU]'],
+ }
+ METHYLATION_LABELS = {'+': TOKENIZER['+'], '-': TOKENIZER['-']}
+ 
+@@ -149,6 +150,7 @@ class DataConfig:
+     chg: int = 0
+     chh: int = 0
+     m6A: int = 0
++    hmU: int = 0
+     
+     # Platform parameters
+     pore_type: str = 'R9.4.1'
+diff --git a/unimeth/data/extract.py b/unimeth/data/extract.py
+index a8c6ac3..5ebae4f 100644
+--- a/unimeth/data/extract.py
++++ b/unimeth/data/extract.py
+@@ -76,9 +76,17 @@ class SignalFeatureExtractor:
+         self.detect_chg = getattr(args, 'chg', 0)
+         self.detect_chh = getattr(args, 'chh', 0)
+         self.detect_m6a = getattr(args, 'm6A', 0)
++        self.detect_hmu = getattr(args, 'hmU', 0)
+         
+         # Determine modification type
+-        if self.detect_m6a == 1:
++        # label patch (5hmC/4mC)
++        if getattr(args, 'hmC', 0) == 1:
++            self.detect_mod = ('C', 0, 'h')
++        elif getattr(args, 'm4C', 0) == 1:
++            self.detect_mod = ('C', 0, 21839)
++        elif self.detect_hmu == 1:
++            self.detect_mod = ('T', 0, 'g')
++        elif self.detect_m6a == 1:
+             self.detect_mod = ('A', 0, 'a')
+         elif self.detect_cpg or self.detect_chg or self.detect_chh:
+             self.detect_mod = ('C', 0, 'm')
+@@ -179,7 +187,7 @@ class SignalFeatureExtractor:
+ 
+         if is_unmapped:
+             pred_pos = find_methylation_sites(
+-                seq, self.detect_cpg, self.detect_chg, self.detect_chh, self.detect_m6a
++                seq, self.detect_cpg, self.detect_chg, self.detect_chh, self.detect_m6a, self.detect_hmu
+             )
+             ref_pos = [-1] * len(pred_pos)
+         else:
+@@ -199,7 +207,7 @@ class SignalFeatureExtractor:
+ 
+             # Find methylation positions
+             pred_pos = find_methylation_sites(
+-                seq, self.detect_cpg, self.detect_chg, self.detect_chh, self.detect_m6a
++                seq, self.detect_cpg, self.detect_chg, self.detect_chh, self.detect_m6a, self.detect_hmu
+             )
+             ref_pos = get_ref_pos(seq, pred_pos, aligned_pairs, bam_read.is_reverse)
+         
+diff --git a/unimeth/data/pipeline.py b/unimeth/data/pipeline.py
+index a959b69..545db52 100644
+--- a/unimeth/data/pipeline.py
++++ b/unimeth/data/pipeline.py
+@@ -56,7 +56,7 @@ def get_norm_params(feature, frequency, dorado_version):
+ 
+ 
+ def add_tokens(bases, signal_event, pred_pos, ref_pos=None, bis_label=None,
+-               detect_cpg=0, detect_chg=0, detect_chh=0, detect_m6a=0):
++               detect_cpg=0, detect_chg=0, detect_chh=0, detect_m6a=0, detect_hmu=0):
+     """
+     Add methylation type tokens to sequence.
+     
+@@ -77,7 +77,7 @@ def add_tokens(bases, signal_event, pred_pos, ref_pos=None, bis_label=None,
+         pos_r = None if ref_pos is None else ref_pos[i]
+         pos_p = pred_pos[i]
+         
+-        methy_type = get_methy_type(bases, pos_p, detect_cpg, detect_chg, detect_chh, detect_m6a)
++        methy_type = get_methy_type(bases, pos_p, detect_cpg, detect_chg, detect_chh, detect_m6a, detect_hmu)
+         
+         if methy_type is not None:
+             bases.insert(pos_p+1, methy_type)
+@@ -125,7 +125,8 @@ def get_inference_datasets(feature, args):
+         detect_cpg=args.cpg,
+         detect_chg=args.chg,
+         detect_chh=args.chh,
+-        detect_m6a=args.m6A
++        detect_m6a=args.m6A,
++        detect_hmu=getattr(args, 'hmU', 0)
+     )
+     
+     shift, scale = get_norm_params(feature, args.frequency, args.dorado_version)
+@@ -191,7 +192,8 @@ def get_finetune_datasets(feature, args):
+         detect_cpg=args.cpg,
+         detect_chg=args.chg,
+         detect_chh=args.chh,
+-        detect_m6a=args.m6A
++        detect_m6a=args.m6A,
++        detect_hmu=getattr(args, 'hmU', 0)
+     )
+     
+     shift, scale = get_norm_params(feature, args.frequency, args.dorado_version)
+diff --git a/unimeth/data/sites.py b/unimeth/data/sites.py
+index fb0b63e..6b2dff8 100644
+--- a/unimeth/data/sites.py
++++ b/unimeth/data/sites.py
+@@ -7,7 +7,7 @@ and determining their types.
+ 
+ 
+ def find_methylation_sites(seq: str, detect_cpg: int, detect_chg: int,
+-                           detect_chh: int, detect_m6a: int) -> list:
++                           detect_chh: int, detect_m6a: int, detect_hmu: int = 0) -> list:
+     """
+     Find positions of methylation sites in a sequence.
+     
+@@ -35,11 +35,14 @@ def find_methylation_sites(seq: str, detect_cpg: int, detect_chg: int,
+         elif seq[i] == 'A':
+             if detect_m6a:
+                 pred_pos.append(i)
++        elif seq[i] == 'T':
++            if detect_hmu:
++                pred_pos.append(i)
+     return pred_pos
+ 
+ 
+ def get_methy_type(seq: str, pos: int, detect_cpg: int, detect_chg: int,
+-                   detect_chh: int, detect_m6a: int) -> str | None:
++                   detect_chh: int, detect_m6a: int, detect_hmu: int = 0) -> str | None:
+     """
+     Get methylation type at a position.
+     
+@@ -63,4 +66,6 @@ def get_methy_type(seq: str, pos: int, detect_cpg: int, detect_chg: int,
+             return '[CHH]' if detect_chh else None
+     elif seq[pos] == 'A':
+         return '[m6A]' if detect_m6a else None
++    elif seq[pos] == 'T':
++        return '[5hmU]' if detect_hmu else None
+     return None
+diff --git a/unimeth/eval/metrics.py b/unimeth/eval/metrics.py
+index 216277c..2baa160 100644
+--- a/unimeth/eval/metrics.py
++++ b/unimeth/eval/metrics.py
+@@ -164,7 +164,7 @@ def compute_metrics(pred, tokenizer: Dict, methy_types: Optional[List[str]] = No
+         Dictionary of metrics per methylation type
+     """
+     if methy_types is None:
+-        methy_types = ['[CpG]', '[CHG]', '[CHH]', '[m6A]']
++        methy_types = ['[CpG]', '[CHG]', '[CHH]', '[m6A]', '[5hmU]']
+     
+     predictions, labels, decoder_input_ids = pred.predictions, pred.label_ids, pred.inputs
+     positive, negative = tokenizer['+'], tokenizer['-']
+diff --git a/unimeth/model/loader.py b/unimeth/model/loader.py
+index 71e00c6..a868e48 100644
+--- a/unimeth/model/loader.py
++++ b/unimeth/model/loader.py
+@@ -81,5 +81,20 @@ def load_model(
+ def _load_checkpoint(model, checkpoint_path):
+     """Load checkpoint weights into model."""
+     state_dict = torch.load(checkpoint_path, map_location='cpu')
++    # 5hmU patch: a checkpoint written with a smaller vocabulary is expanded along
++    # its vocabulary dimension; new rows start as a copy of the [m6A] row.
++    from unimeth.config import TOKENIZER
++    own = model.state_dict(); src_row = TOKENIZER['[m6A]']; grown = []
++    for k, v in list(state_dict.items()):
++        if k not in own or own[k].shape == v.shape or own[k].ndim != v.ndim:
++            continue
++        diff = [d for d in range(v.ndim) if own[k].shape[d] != v.shape[d]]
++        if len(diff) != 1 or own[k].shape[diff[0]] < v.shape[diff[0]]:
++            continue
++        d = diff[0]; extra = own[k].shape[d] - v.shape[d]
++        fill = v.narrow(d, src_row, 1).repeat_interleave(extra, dim=d) if v.shape[d] > src_row else torch.zeros_like(v.narrow(d, 0, 1)).repeat_interleave(extra, dim=d)
++        state_dict[k] = torch.cat([v, fill.to(v.dtype)], dim=d); grown.append(f"{k} {tuple(v.shape)}->{tuple(state_dict[k].shape)}")
++    if grown:
++        print("[5hmU patch] expanded checkpoint tensors: " + "; ".join(grown), flush=True)
+     model.load_state_dict(state_dict, strict=True)
+     return model
+diff --git a/unimeth/training/__main__.py b/unimeth/training/__main__.py
+index aadb8a1..7df4826 100644
+--- a/unimeth/training/__main__.py
++++ b/unimeth/training/__main__.py
+@@ -72,6 +72,10 @@ def create_training_argument_parser() -> argparse.ArgumentParser:
+     parser.add_argument('--chg', type=int, default=0, help='Enable CHG detection (1=yes)')
+     parser.add_argument('--chh', type=int, default=0, help='Enable CHH detection (1=yes)')
+     parser.add_argument('--m6A', type=int, default=0, help='Enable m6A detection (1=yes)')
++    parser.add_argument('--hmU', type=int, default=0, help='Enable 5hmU detection at every T (1=yes)')
++    # label patch (5hmC/4mC)
++    parser.add_argument('--hmC', type=int, default=0, help='Labels from C+h tags: 5hmC at the C context sites (1=yes)')
++    parser.add_argument('--m4C', type=int, default=0, help='Labels from C+21839 tags: 4mC at the C context sites (1=yes)')
+ 
+     parser.add_argument('--plant', type=int, default=0,
+                         help='Use plant-specific unbalanced loss (1=yes)')
+diff --git a/unimeth/training/trainer_base.py b/unimeth/training/trainer_base.py
+index 63676ec..6efa5d9 100644
+--- a/unimeth/training/trainer_base.py
++++ b/unimeth/training/trainer_base.py
+@@ -55,14 +55,14 @@ class BaseTrainer(ABC):
+             remove_unused_columns=False,
+ 
+             # Dataloader
+-            bf16=True,
+-            dataloader_num_workers=4,
++            bf16=os.environ.get('UNIMETH_BF16', '1') == '1',
++            dataloader_num_workers=int(os.environ.get('UNIMETH_DL_WORKERS', '4')),
+             dataloader_pin_memory=True,
+-            dataloader_prefetch_factor=2,
++            dataloader_prefetch_factor=2 if int(os.environ.get('UNIMETH_DL_WORKERS', '4')) > 0 else None,
+             dataloader_drop_last=True,
+ 
+             # Save model
+-            output_dir=f"models/{self.mode}/{self.args.run_name}",
++            output_dir=os.environ.get("UNIMETH_OUT_DIR") or f"models/{self.mode}/{self.args.run_name}",
+             overwrite_output_dir=True,
+             save_only_model=False,
+             save_safetensors=False,
+@@ -71,7 +71,7 @@ class BaseTrainer(ABC):
+ 
+             # Logging
+             logging_strategy="steps",
+-            logging_steps=500,
++            logging_steps=int(os.environ.get('UNIMETH_LOG_STEPS', '500')),
+ 
+             # Evaluation
+             eval_strategy="steps",
+@@ -99,7 +99,7 @@ class BaseTrainer(ABC):
+             'finetune': 5000,
+             'calibration': 5000
+         }
+-        return steps.get(self.mode, 5000)
++        return int(os.environ.get('UNIMETH_SAVE_STEPS', steps.get(self.mode, 5000)))
+     
+     def _get_eval_steps(self):
+         """Get evaluation steps for the mode."""
+@@ -108,7 +108,7 @@ class BaseTrainer(ABC):
+             'finetune': 10000,
+             'calibration': 2000
+         }
+-        return steps.get(self.mode, 10000)
++        return int(os.environ.get('UNIMETH_EVAL_STEPS', steps.get(self.mode, 10000)))
+     
+     def _get_report_to(self):
+         """Get report destination for the mode."""
+@@ -170,7 +170,34 @@ class BaseTrainer(ABC):
+ 
+         trainer = self.create_trainer()
+ 
++        if self.mode != 'pretrain' and os.environ.get('UNIMETH_SKIP_INITIAL_EVAL', '0') != '1':
++            local_print(trainer.evaluate())
++        # 5hmU patch: resume from the last checkpoint in the output dir (preempted jobs are requeued)
++        _out = self.training_args.output_dir
++        _resume = os.environ.get('UNIMETH_RESUME', '0') == '1' and os.path.isdir(_out) and any(d.startswith('checkpoint-') for d in os.listdir(_out))
++        # 5hmU patch 2: init weights from a checkpoint (continue a run without the Trainer's torch.load-based resume)
++        _init = os.environ.get('UNIMETH_INIT_WEIGHTS')
++        if _init:
++            if _init.endswith('.safetensors'):
++                from safetensors.torch import load_file as _load_sf
++                _sd = _load_sf(_init)
++            else:
++                import torch as _torch_init
++                _sd = _torch_init.load(_init, map_location='cpu', weights_only=True)
++            _model = trainer.accelerator.unwrap_model(trainer.model)
++            _res = _model.load_state_dict(_sd, strict=False)
++            _cur = _model.state_dict()
++            _loaded_ptrs = {_cur[k].data_ptr() for k in _sd if k in _cur}
++            _really_missing = [k for k in _res.missing_keys if _cur[k].data_ptr() not in _loaded_ptrs]   # tied weights may be absent from the file but share storage with a loaded one
++            local_print(f'[5hmU] init weights from {_init}: {sum(1 for k in _sd if k in _cur)}/{len(_cur)} tensors loaded, tied={len(_res.missing_keys) - len(_really_missing)}, missing={_really_missing[:5]}, unexpected={_res.unexpected_keys[:5]}')
++            if _really_missing or _res.unexpected_keys:
++                raise RuntimeError('UNIMETH_INIT_WEIGHTS does not match the model')
++        trainer.train(resume_from_checkpoint=True if _resume else None)
++        # 5hmU patch: always leave the final weights behind, in the plain state-dict
++        # form that load_model() reads (upstream only saves every save_steps).
++        import torch as _torch
++        final = os.path.join(self.training_args.output_dir, 'final.pt')
++        _torch.save(trainer.accelerator.unwrap_model(trainer.model).state_dict(), final)
++        local_print(f'saved final weights to {final}')
+         if self.mode != 'pretrain':
+             local_print(trainer.evaluate())
+-
+-        trainer.train()
+diff --git a/unimeth/utils/bam_tags.py b/unimeth/utils/bam_tags.py
+index 6bd0069..a99c925 100644
+--- a/unimeth/utils/bam_tags.py
++++ b/unimeth/utils/bam_tags.py
+@@ -16,6 +16,12 @@ MOD_TYPE_CONFIG = {
+     'CHG': ('C', ('C', 0, 'm')),
+     'CHH': ('C', ('C', 0, 'm')),
+     'a': ('A', ('A', 0, 'a')),
++    '5hmU': ('T', ('T', 0, 'g')),
++    'g': ('T', ('T', 0, 'g')),
++    # label patch (5hmC/4mC)
++    'h': ('C', ('C', 0, 'h')),
++    '21839': ('C', ('C', 0, 21839)),
++    21839: ('C', ('C', 0, 21839)),
+ }
+ 
+ 

@@ -1,0 +1,8 @@
+# Bisulfite / EM-seq sources for bench.bisulfite_rows (one rule for all rows; see its docstring). source is relative to
+# $BENCH_DATA (where test/data/download_*.sh put it).
+#row	sample	context	format	source
+arabidopsis_cpg	arabidopsis_chr1	cpg	ontbasemod	d4_athaliana/ground_truth/Arabidopsis_bisulfite_20x.tsv
+arabidopsis_noncpg	arabidopsis_chr1	noncpg	ontbasemod	d4_athaliana/ground_truth/Arabidopsis_bisulfite_20x.tsv
+hg002_cpg	hg002	cpg	bismark	d7_human_hg002/ground_truth/CpG.bismark.zero.cov.gz
+rice_cpg	rice_w	cpg	ontbasemod	d5_osativa/ground_truth/osjaponica_bisulfite_20x.tsv
+mouse_cpg	mouse	cpg	ontbasemod	d6_mouse_brain/ground_truth/mouse_brain_bisulfite_chr1_20x.tsv

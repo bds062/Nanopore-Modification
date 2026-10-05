@@ -486,6 +486,7 @@ def train_one_model(group, train_idx, hp, device, out_dir, tag, model_factory=No
 
 
 LAST_EVAL = None   # (y_true, y_score) of the most recent evaluate() call
+LAST_EVAL_FILES = None
 
 
 def evaluate(model, group, test_idx, device, hp):
@@ -493,9 +494,11 @@ def evaluate(model, group, test_idx, device, hp):
     loader = DataLoader(ds, shuffle=False, **make_loader_kwargs(hp.batch, hp.num_workers, device, _wif))
     yt, yp = run_inference(model, loader, device)
     keys = group.source_keys(test_idx)
-    t, p, _ = aggregate_by_position(yt, yp, keys)
-    global LAST_EVAL
+    t, p, pkeys = aggregate_by_position(yt, yp, keys)
+    global LAST_EVAL, LAST_EVAL_FILES
     LAST_EVAL = (np.asarray(t), np.asarray(p))
+    # source file of each scored position (names carry the strand, e.g. *_plus / *_minus)
+    LAST_EVAL_FILES = np.array([group.names[int(k[0])] for k in pkeys])
     return compute_metrics(t, p)
 
 

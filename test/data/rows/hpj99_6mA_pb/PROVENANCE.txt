@@ -1,0 +1,1 @@
+bench.pacbio_rows hpj99 m6A: ipdSummary calls d10_hpylori_j99/pacbio/ipd/modbase.gff (SMRT Link 13.1); confirmed motif rate>=0.9, explain>=50; negatives cov>=20, no call within 3 bp; spillover []

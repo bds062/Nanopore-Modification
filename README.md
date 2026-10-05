@@ -14,8 +14,9 @@ transfer to modifications not seen during training.
 3. [Choosing a workflow](#choosing-a-workflow)
 4. [Genome maps](#genome-maps)
 5. [Evaluation on sites with known modification status](#evaluation-on-sites-with-known-modification-status)
-6. [Training](#training)
-7. [Site configuration](#site-configuration)
+6. [Reproducing the benchmark](#reproducing-the-benchmark)
+7. [Training](#training)
+8. [Site configuration](#site-configuration)
 
 ## Installation
 
@@ -58,6 +59,10 @@ Test sets contain one pileup image per site and strand. Per-model metrics are
 provided in `checkpoints/rawmod_final/metrics.tsv`. Use `mixed.pt` to score new
 data; the `loco_<mark>.pt` models are intended only to measure how well RawMod
 generalizes to a modification it has not seen.
+
+`checkpoints/rawmod_leaveout/` contains the leave-out models of the benchmark: each was
+trained with the configuration of `mixed.pt` but without one organism or library
+(see [Reproducing the benchmark](#reproducing-the-benchmark)).
 
 `checkpoints/results20_sad_dim16/` contains an earlier model, retained for
 reproducibility. Its reported metrics were computed on different test sets and
@@ -287,6 +292,16 @@ An existing `features.h5` can also be scored directly:
 python scripts/test/score_genome.py --h5 features.h5 --dataset my_sample \
   --checkpoint checkpoints/rawmod_final/mixed.pt --out-dir results/my_sample
 ```
+
+## Reproducing the benchmark
+
+[`test/`](test/README.md) reproduces the paper's comparison of RawMod with Dorado,
+UniMeth, DeepMod2, Rockfish and MethyNano on 15 ground-truth rows across five
+modifications: download scripts with the links of every dataset
+([`test/data`](test/data/README.md)), the fixed read sets and ground-truth
+positions, and the scripts that run every tool and write Table 1, Figure 3 and the
+supplementary benchmark tables ([`test/evaluation`](test/evaluation/)). Any RawMod
+checkpoint can be added to the benchmark as its own column.
 
 ## Training
 

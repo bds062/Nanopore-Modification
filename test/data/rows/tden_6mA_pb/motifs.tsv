@@ -1,0 +1,7 @@
+motif	kmer	offset	genome_occurrences	call_rate	calls_explained	used
+AA[A]TTT	AAATTT	2	8346	0.999	8336	yes
+GA[A]TTT	GAATTT	2	4885	0.998	4876	yes
+AA[A]TTC	AAATTC	2	4885	0.998	4875	yes
+CTA[A]T	CTAAT	3	2984	0.973	2903	yes
+GA[A]TTC	GAATTC	2	1928	1.000	1928	yes
+GAAG[A]G	GAAGAG	4	1695	0.998	1692	yes

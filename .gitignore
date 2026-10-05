@@ -67,3 +67,11 @@ wandb/
 *.bak
 *.bak_*
 *.pre_*
+
+# Benchmark (test/): the benchmark definition in test/data is tracked; downloads, outputs and local site files are not
+!/test/data/
+/test/data/d[0-9]*_*/
+/test/work/
+/test/benchmark/config/site.env
+/test/benchmark/config/site.*.env
+!/test/benchmark/config/site.example.env

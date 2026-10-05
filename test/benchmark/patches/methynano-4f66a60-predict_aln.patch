@@ -1,0 +1,840 @@
+diff --git a/predict_aln.py b/predict_aln.py
+new file mode 100644
+index 0000000..3f87f66
+--- /dev/null
++++ b/predict_aln.py
+@@ -0,0 +1,834 @@
++from pathlib import Path
++import argparse
++import csv
++import glob
++import multiprocessing as mp
++from multiprocessing import shared_memory
++import os
++import re
++import sys
++import traceback
++from functools import lru_cache
++from typing import Dict, List, Tuple, Optional, Sequence
++
++import numpy as np
++import pod5
++import pysam
++import torch
++import torch.nn.functional as F
++from tqdm.auto import tqdm
++
++ROOT = Path(__file__).resolve().parent
++sys.path.insert(0, str(ROOT))
++
++from moduls import MethyNano  # noqa: E402
++
++try:
++    from numba import njit
++    NUMBA_AVAILABLE = True
++except Exception:
++    NUMBA_AVAILABLE = False
++    def njit(*args, **kwargs):
++        def deco(fn):
++            return fn
++        return deco
++
++_DEFAULT_MOTIF = "......C......"
++_BASE_MAP = np.full(256, 4, dtype=np.uint8)
++for _ch, _v in [(b"A", 0), (b"C", 1), (b"G", 2), (b"T", 3), (b"N", 4)]:
++    _BASE_MAP[_ch[0]] = _v
++    _BASE_MAP[_ch.lower()[0]] = _v
++
++
++def encode_seq_fast_13mer(seq: str) -> np.ndarray:
++    b = np.frombuffer(seq.encode("ascii", "replace"), dtype=np.uint8, count=13)
++    return _BASE_MAP[b]
++
++
++def reverse_complement(seq: str) -> str:
++    comp = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
++    return "".join(comp.get(base, "N") for base in reversed(seq.upper()))
++
++
++def discover_pod5_files(inputs: Sequence[str], recursive: bool = True) -> List[str]:
++    files: List[str] = []
++    for p in inputs:
++        if os.path.isdir(p):
++            pattern = "**/*.pod5" if recursive else "*.pod5"
++            files.extend(glob.glob(os.path.join(p, pattern), recursive=recursive))
++        elif p.endswith(".pod5"):
++            files.append(p)
++    return sorted(set(files))
++
++
++def convert_base_name(base_name: str) -> str:
++    merge_bases = {
++        "A": "A", "C": "C", "G": "G", "T": "T",
++        "M": "[AC]", "V": "[ACG]", "R": "[AG]", "H": "[ACT]",
++        "W": "[AT]", "D": "[AGT]", "S": "[CG]", "B": "[CGT]",
++        "Y": "[CT]", "N": "[ACGT]", "K": "[GT]", ".": ".",
++    }
++    return "".join(merge_bases.get(base, base) for base in base_name)
++
++
++def safe_mad(x: np.ndarray) -> float:
++    med = float(np.median(x))
++    mad = float(np.median(np.abs(x - med)))
++    if not np.isfinite(mad) or mad == 0.0:
++        mad = float(x.std(dtype=np.float32))
++        if not np.isfinite(mad) or mad == 0.0:
++            mad = 1.0
++    else:
++        mad *= 1.4826
++    return mad
++
++
++@lru_cache(maxsize=4096)
++def _interp_grid(n: int) -> Tuple[np.ndarray, np.ndarray]:
++    x_old = np.linspace(0.0, n - 1.0, n, dtype=np.float32)
++    x_new = np.linspace(0.0, n - 1.0, 100, dtype=np.float32)
++    return x_old, x_new
++
++
++def interp(signal: np.ndarray) -> np.ndarray:
++    arr = np.asarray(signal, dtype=np.float32)
++    n = arr.size
++    if n == 0:
++        return np.zeros((100,), dtype=np.float32)
++    if n == 1:
++        return np.full((100,), float(arr[0]), dtype=np.float32)
++    if not np.all(np.isfinite(arr)):
++        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
++    x_old, x_new = _interp_grid(n)
++    return np.interp(x_new, x_old, arr, left=arr[0], right=arr[-1]).astype(np.float32, copy=False)
++
++
++def _safe_stats(arr: np.ndarray) -> Tuple[float, float, int]:
++    n = arr.size
++    if n == 0:
++        return 0.0, 0.0, 0
++    return float(np.mean(arr, dtype=np.float32)), float(np.std(arr, dtype=np.float32)), int(n)
++
++
++def nz(x: torch.Tensor) -> torch.Tensor:
++    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
++
++
++def load_reference_dict(reference_fa: str) -> Dict[str, str]:
++    ref: Dict[str, List[str]] = {}
++    current = None
++    with open(reference_fa, "r", encoding="utf-8", errors="ignore") as f:
++        for raw in f:
++            line = raw.strip()
++            if not line:
++                continue
++            if line.startswith(">"):
++                current = line[1:].split()[0]
++                ref[current] = []
++            else:
++                if current is None:
++                    raise ValueError("Invalid FASTA: sequence line before header")
++                ref[current].append(line.upper())
++    return {k: "".join(v) for k, v in ref.items()}
++
++
++def build_segment_bounds(move_table: np.ndarray, stride: int, start_idx: int, signal_len: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
++    move_indices = np.flatnonzero(move_table)
++    if move_indices.size == 0:
++        return None
++    starts = move_indices.astype(np.int64) * stride + start_idx
++    ends = np.empty_like(starts)
++    if move_indices.size > 1:
++        ends[:-1] = move_indices[1:].astype(np.int64) * stride + start_idx
++        avg_len = int(np.mean(ends[:-1] - starts[:-1])) if starts.size > 1 else 5
++    else:
++        avg_len = 5
++    ends[-1] = min(starts[-1] + max(1, avg_len), signal_len)
++    return starts, ends
++
++
++def load_bam_records(bam_path: str, forward_only: bool = False) -> Dict[str, dict]:
++    bam_dict: Dict[str, dict] = {}
++    with pysam.AlignmentFile(bam_path, "rb") as bam:
++        if not bam.has_index():
++            raise RuntimeError(f"BAM index is not available or not readable: {bam_path}.bai")
++        for aln in bam:
++            if aln.is_unmapped or aln.is_secondary or aln.is_supplementary:
++                continue
++            if forward_only and aln.is_reverse:
++                continue
++            try:
++                mv = aln.get_tag("mv")
++                ts = int(aln.get_tag("ts"))
++            except KeyError:
++                continue
++            bam_dict[aln.query_name] = {
++                "ref_name": aln.reference_name,
++                "ref_start": int(aln.reference_start),
++                "ref_end": int(aln.reference_end),
++                "query_seq": aln.query_sequence or "",
++                "is_reverse": bool(aln.is_reverse),
++                "mv": mv,
++                "ts": ts,
++                "cigar": aln.cigartuples,
++            }
++    return bam_dict
++
++
++def query_to_ref(cigar, ref_start: int, qlen: int) -> np.ndarray:
++    """[predict_aln] Map each BAM query index to its 0-based reference position via the CIGAR.
++    Upstream predict.py used ref_start + query index, which ignores soft clips and indels."""
++    out = np.full(qlen, -1, dtype=np.int64)
++    q, r = 0, ref_start
++    for op, ln in cigar:
++        if op in (0, 7, 8):      # M, =, X
++            out[q:q + ln] = np.arange(r, r + ln); q += ln; r += ln
++        elif op in (1, 4):       # I, S
++            q += ln
++        elif op in (2, 3):       # D, N
++            r += ln
++    return out
++
++
++def find_candidate_centers(query_seq: str, clip: int, motif: str, motif_regex: Optional[re.Pattern]) -> List[int]:
++    left = clip
++    right = len(query_seq) - clip
++    if right <= left:
++        return []
++    if motif == _DEFAULT_MOTIF:
++        return [i for i in range(left, right) if query_seq[i] == "C"]
++    centers: List[int] = []
++    if motif_regex is None:
++        return centers
++    for m in motif_regex.finditer(query_seq):
++        center = m.start() + 6
++        if left <= center < right:
++            centers.append(center)
++    return centers
++
++
++@njit(cache=True)
++def _extract_site_features_numba(pA_signal, st13, en13, fl_med, fl_mad, out_sig, out_stats):
++    for idx in range(13):
++        st = int(st13[idx])
++        en = int(en13[idx])
++        seg_len = en - st
++        if seg_len <= 0:
++            return False
++
++        mean_val = 0.0
++        for j in range(seg_len):
++            v = (float(pA_signal[st + j]) - fl_med) / fl_mad
++            mean_val += v
++        mean_val /= seg_len
++
++        var_val = 0.0
++        for j in range(seg_len):
++            v = (float(pA_signal[st + j]) - fl_med) / fl_mad
++            d = v - mean_val
++            var_val += d * d
++        var_val /= seg_len
++        std_val = np.sqrt(var_val)
++
++        out_stats[idx, 0] = mean_val
++        out_stats[idx, 1] = std_val
++        out_stats[idx, 2] = seg_len
++
++        if seg_len == 1:
++            only = (float(pA_signal[st]) - fl_med) / fl_mad
++            for t in range(100):
++                out_sig[idx, t] = only
++        else:
++            scale = (seg_len - 1.0) / 99.0
++            for t in range(100):
++                pos = scale * t
++                left = int(pos)
++                right = left + 1
++                if right >= seg_len:
++                    right = seg_len - 1
++                    left = right
++                    w = 0.0
++                else:
++                    w = pos - left
++                v0 = (float(pA_signal[st + left]) - fl_med) / fl_mad
++                v1 = (float(pA_signal[st + right]) - fl_med) / fl_mad
++                out_sig[idx, t] = v0 * (1.0 - w) + v1 * w
++    return True
++
++
++def warmup_numba():
++    if not NUMBA_AVAILABLE:
++        return
++    pA = np.linspace(0, 1, 256, dtype=np.float32)
++    st13 = np.arange(13, dtype=np.int64) * 4
++    en13 = st13 + 8
++    out_sig = np.empty((13, 100), dtype=np.float32)
++    out_stats = np.empty((13, 3), dtype=np.float32)
++    _extract_site_features_numba(pA, st13, en13, 0.5, 1.0, out_sig, out_stats)
++
++
++class SharedFeatureStore:
++    def __init__(self, num_slots: int, batch_size: int, signal_dtype: str, create: bool):
++        self.num_slots = int(num_slots)
++        self.batch_size = int(batch_size)
++        self.seq_shape = (self.num_slots, self.batch_size, 13)
++        self.sig_shape = (self.num_slots, self.batch_size, 13, 100)
++        self.stats_shape = (self.num_slots, self.batch_size, 13, 3)
++        self.pos_shape = (self.num_slots, self.batch_size)
++        self.seq_dtype = np.uint8
++        self.sig_dtype = np.float16 if signal_dtype == "float16" else np.float32
++        self.stats_dtype = np.float32
++        self.pos_dtype = np.int32
++        self.create = create
++
++        self.seq_shm = None
++        self.sig_shm = None
++        self.stats_shm = None
++        self.pos_shm = None
++
++    def create_segments(self):
++        self.seq_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(self.seq_shape)) * np.dtype(self.seq_dtype).itemsize)
++        self.sig_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(self.sig_shape)) * np.dtype(self.sig_dtype).itemsize)
++        self.stats_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(self.stats_shape)) * np.dtype(self.stats_dtype).itemsize)
++        self.pos_shm = shared_memory.SharedMemory(create=True, size=int(np.prod(self.pos_shape)) * np.dtype(self.pos_dtype).itemsize)
++
++    def attach_segments(self, names: Dict[str, str]):
++        self.seq_shm = shared_memory.SharedMemory(name=names["seq"])
++        self.sig_shm = shared_memory.SharedMemory(name=names["sig"])
++        self.stats_shm = shared_memory.SharedMemory(name=names["stats"])
++        self.pos_shm = shared_memory.SharedMemory(name=names["pos"])
++
++    def arrays(self):
++        seq = np.ndarray(self.seq_shape, dtype=self.seq_dtype, buffer=self.seq_shm.buf)
++        sig = np.ndarray(self.sig_shape, dtype=self.sig_dtype, buffer=self.sig_shm.buf)
++        stats = np.ndarray(self.stats_shape, dtype=self.stats_dtype, buffer=self.stats_shm.buf)
++        pos = np.ndarray(self.pos_shape, dtype=self.pos_dtype, buffer=self.pos_shm.buf)
++        return seq, sig, stats, pos
++
++    def names(self) -> Dict[str, str]:
++        return {"seq": self.seq_shm.name, "sig": self.sig_shm.name, "stats": self.stats_shm.name, "pos": self.pos_shm.name}
++
++    def close(self):
++        for shm in (self.seq_shm, self.sig_shm, self.stats_shm, self.pos_shm):
++            if shm is not None:
++                try:
++                    shm.close()
++                except Exception:
++                    pass
++
++    def unlink(self):
++        for shm in (self.seq_shm, self.sig_shm, self.stats_shm, self.pos_shm):
++            if shm is not None:
++                try:
++                    shm.unlink()
++                except FileNotFoundError:
++                    pass
++                except Exception:
++                    pass
++
++
++def producer_reads(pod5_inputs: List[str], recursive: bool, n_workers: int, in_queue, out_queue, producer_chunk_size: int):
++    try:
++        pod5_files = discover_pod5_files(pod5_inputs, recursive=recursive)
++        if not pod5_files:
++            raise FileNotFoundError("No POD5 files found.")
++        total_reads_seen = 0
++        chunk: List[dict] = []
++        for pod5_path in pod5_files:
++            with pod5.Reader(pod5_path) as reader:
++                for read_record in tqdm(reader.reads(), desc=f"Reading {os.path.basename(pod5_path)}", dynamic_ncols=True):
++                    chunk.append({
++                        "read_id": str(read_record.read_id),
++                        "raw_signal": np.asarray(read_record.signal, dtype=np.float32),
++                        "offset": float(read_record.calibration.offset),
++                        "scale": float(read_record.calibration.scale),
++                    })
++                    total_reads_seen += 1
++                    if len(chunk) >= producer_chunk_size:
++                        in_queue.put(chunk)
++                        chunk = []
++        if chunk:
++            in_queue.put(chunk)
++        for _ in range(n_workers):
++            in_queue.put(None)
++        out_queue.put(("producer_done", {"total_reads_seen": total_reads_seen, "pod5_files": len(pod5_files)}))
++    except Exception:
++        out_queue.put(("producer_error", {"traceback": traceback.format_exc()}))
++
++
++def feature_worker(worker_id: int, in_queue, out_queue, free_slot_queue, shm_names: Dict[str, str], num_slots: int,
++                   bam_dict: Dict[str, dict], ref_dict: Dict[str, str], clip: int, motif: str, min_read_bases: int,
++                   require_query_ref_match: bool, sig_scalar_mode: str, feature_batch_size: int, signal_dtype_str: str,
++                   sites: Optional[Dict[str, set]] = None):
++    try:
++        store = SharedFeatureStore(num_slots=num_slots, batch_size=feature_batch_size, signal_dtype=signal_dtype_str, create=False)
++        store.attach_segments(shm_names)
++        seq_slots, sig_slots, stats_slots, pos_slots = store.arrays()
++
++        motif_regex = None
++        if motif != _DEFAULT_MOTIF:
++            motif_regex = re.compile(f"(?=({convert_base_name(motif)}))")
++
++        usable_reads = 0
++        skipped_reads = 0
++        emitted_samples = 0
++        signal_dtype = np.float16 if signal_dtype_str == "float16" else np.float32
++
++        seq_buf = np.empty((feature_batch_size, 13), dtype=np.uint8)
++        sig_buf = np.empty((feature_batch_size, 13, 100), dtype=signal_dtype)
++        stats_buf = np.empty((feature_batch_size, 13, 3), dtype=np.float32)
++        pos_buf = np.empty((feature_batch_size,), dtype=np.int32)
++        read_ids: List[str] = [""] * feature_batch_size
++        kmers: List[str] = [""] * feature_batch_size
++        buf_count = 0
++        tmp_sig = np.empty((13, 100), dtype=np.float32)
++        tmp_stats = np.empty((13, 3), dtype=np.float32)
++
++        def flush():
++            nonlocal buf_count
++            if buf_count <= 0:
++                return
++            slot_id = free_slot_queue.get()
++            seq_slots[slot_id, :buf_count] = seq_buf[:buf_count]
++            sig_slots[slot_id, :buf_count] = sig_buf[:buf_count]
++            stats_slots[slot_id, :buf_count] = stats_buf[:buf_count]
++            pos_slots[slot_id, :buf_count] = pos_buf[:buf_count]
++            out_queue.put(("data_shm", {
++                "worker_id": worker_id,
++                "slot_id": int(slot_id),
++                "count": int(buf_count),
++                "read_ids": tuple(read_ids[:buf_count]),
++                "kmers": tuple(kmers[:buf_count]),
++            }))
++            buf_count = 0
++
++        while True:
++            packet_chunk = in_queue.get()
++            if packet_chunk is None:
++                break
++
++            for packet in packet_chunk:
++                read_id = packet["read_id"]
++                aln = bam_dict.get(read_id)
++                if aln is None:
++                    continue
++
++                ref_name = aln["ref_name"]
++                ref_seq_all = ref_dict.get(ref_name)
++                if ref_seq_all is None:
++                    skipped_reads += 1
++                    continue
++
++                ref_start_0b = aln["ref_start"]
++                ref_end_0b = aln["ref_end"]
++                query_seq = aln["query_seq"]
++                is_reverse = aln["is_reverse"]
++                ref_seq = ref_seq_all[ref_start_0b:ref_end_0b]
++                if is_reverse:
++                    query_seq = reverse_complement(query_seq)
++
++                if len(ref_seq) < min_read_bases or len(query_seq) < min_read_bases:
++                    continue
++
++                centers = find_candidate_centers(query_seq, clip, motif, motif_regex)
++                if not centers:
++                    usable_reads += 1
++                    continue
++
++                mv = aln["mv"]
++                stride = int(mv[0])
++                move_table = np.asarray(mv[1:], dtype=np.int8)
++                ts = aln["ts"]
++
++                raw_signal = packet["raw_signal"]
++                offset = packet["offset"]
++                scale = packet["scale"]
++
++                pA_signal = (raw_signal + offset) * scale
++                trimmed_pA = pA_signal[ts:]
++                if trimmed_pA.size == 0:
++                    skipped_reads += 1
++                    continue
++
++                bounds = build_segment_bounds(move_table, stride, ts, len(pA_signal))
++                if bounds is None:
++                    skipped_reads += 1
++                    continue
++                starts, ends = bounds
++                if len(starts) != len(query_seq):
++                    skipped_reads += 1
++                    continue
++
++                fl_med = float(np.median(trimmed_pA))
++                fl_mad = safe_mad(trimmed_pA)
++                qlen = len(query_seq)
++                qmap = query_to_ref(aln["cigar"], ref_start_0b, qlen)
++                site_set = sites.get(ref_name) if sites is not None else None
++                if sites is not None and not site_set:
++                    usable_reads += 1
++                    continue
++
++                for center_pos in centers:
++                    if buf_count >= feature_batch_size:
++                        flush()
++
++                    query_kmer = query_seq[center_pos - 6:center_pos + 7]
++                    if len(query_kmer) != 13 or query_kmer[6] != "C":
++                        continue
++                    # [predict_aln] center_pos is in read orientation; BAM query index flips for reverse reads.
++                    ref_pos = int(qmap[qlen - 1 - center_pos if is_reverse else center_pos])
++                    if ref_pos < 0:
++                        continue
++                    if site_set is not None and ref_pos not in site_set:
++                        continue
++                    if require_query_ref_match:
++                        ref_kmer = ref_seq[center_pos - 6:center_pos + 7]
++                        if len(ref_kmer) != 13 or query_kmer != ref_kmer:
++                            continue
++
++                    st13 = starts[center_pos - 6:center_pos + 7]
++                    en13 = ends[center_pos - 6:center_pos + 7]
++                    if st13.shape[0] != 13 or np.any(en13 <= st13):
++                        continue
++
++                    if NUMBA_AVAILABLE:
++                        valid = _extract_site_features_numba(pA_signal, st13, en13, fl_med, fl_mad, tmp_sig, tmp_stats)
++                        if not valid:
++                            continue
++                        stats_buf[buf_count] = tmp_stats
++                        if signal_dtype == np.float16:
++                            sig_buf[buf_count] = tmp_sig.astype(np.float16)
++                        else:
++                            sig_buf[buf_count] = tmp_sig
++                    else:
++                        means = stats_buf[buf_count, :, 0]
++                        stds = stats_buf[buf_count, :, 1]
++                        lens = stats_buf[buf_count, :, 2]
++                        sig_view = sig_buf[buf_count]
++                        valid = True
++                        for idx in range(13):
++                            seg = pA_signal[st13[idx]:en13[idx]]
++                            if seg.size == 0:
++                                valid = False
++                                break
++                            seg = (seg.astype(np.float32, copy=False) - fl_med) / fl_mad
++                            m, sd, ln = _safe_stats(seg)
++                            means[idx] = m
++                            stds[idx] = sd
++                            lens[idx] = ln
++                            sig_view[idx] = interp(seg).astype(signal_dtype, copy=False)
++                        if not valid:
++                            continue
++
++                    if sig_scalar_mode != "none":
++                        sig_view = sig_buf[buf_count]
++                        if sig_scalar_mode == "first":
++                            v = sig_view[:, 0].copy()
++                        elif sig_scalar_mode == "center":
++                            v = sig_view[:, 50].copy()
++                        else:
++                            v = sig_view.mean(axis=-1, dtype=np.float32).astype(signal_dtype, copy=False)
++                        sig_view[:] = v[:, None]
++
++                    pos_buf[buf_count] = ref_pos  # [predict_aln] 0-based, CIGAR-mapped
++                    seq_buf[buf_count] = encode_seq_fast_13mer(query_kmer)
++                    read_ids[buf_count] = read_id
++                    kmers[buf_count] = query_kmer
++                    buf_count += 1
++                    emitted_samples += 1
++
++                usable_reads += 1
++
++        if buf_count > 0:
++            flush()
++
++        out_queue.put(("done", {
++            "worker_id": worker_id,
++            "usable_reads": usable_reads,
++            "skipped_reads": skipped_reads,
++            "emitted_samples": emitted_samples,
++        }))
++        store.close()
++    except Exception:
++        out_queue.put(("error", {"worker_id": worker_id, "traceback": traceback.format_exc()}))
++
++
++def resolve_device(device_arg: str) -> torch.device:
++    if device_arg == "auto":
++        try:
++            if torch.cuda.is_available():
++                return torch.device("cuda")
++        except Exception:
++            pass
++        return torch.device("cpu")
++    return torch.device(device_arg)
++
++
++def build_model(ckpt_path: str, device: torch.device) -> MethyNano:
++    if device.type == "cuda":
++        torch.backends.cudnn.benchmark = True
++        try:
++            torch.set_float32_matmul_precision("high")
++        except Exception:
++            pass
++        torch.backends.cuda.matmul.allow_tf32 = True
++        torch.backends.cudnn.allow_tf32 = True
++
++    model = MethyNano(with_projection=False, with_classification=True, dimension=256, n_heads=8, dropout=0.1, base_sig=160).to(device)
++    ckpt = torch.load(ckpt_path, map_location="cpu")
++    state = ckpt.get("model", ckpt)
++    missing, unexpected = model.load_state_dict(state, strict=False)
++    print(f"Loaded checkpoint. missing={len(missing)}, unexpected={len(unexpected)}")
++    model.eval()
++    return model
++
++
++def _to_device_no_pin(arr: np.ndarray, device: torch.device, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
++    t = torch.from_numpy(arr)
++    if dtype is not None:
++        t = t.to(dtype=dtype)
++    if device.type != "cpu":
++        t = t.to(device=device, non_blocking=True)
++    return t
++
++
++def infer_batch_chunked(model: MethyNano, device: torch.device, fp16: bool,
++                        seq_arr: np.ndarray, sig_arr: np.ndarray, stats_arr: np.ndarray,
++                        gpu_batch_size: int) -> np.ndarray:
++    n = seq_arr.shape[0]
++    if n == 0:
++        return np.empty((0,), dtype=np.float32)
++
++    out_probs = np.empty((n,), dtype=np.float32)
++    step = max(1, gpu_batch_size)
++
++    with torch.inference_mode():
++        for st in range(0, n, step):
++            ed = min(st + step, n)
++
++            seq_ids = _to_device_no_pin(seq_arr[st:ed], device, dtype=torch.long)
++            sig = _to_device_no_pin(sig_arr[st:ed], device)
++            stats = _to_device_no_pin(stats_arr[st:ed], device, dtype=torch.float32)
++
++            if sig.dtype != torch.float32 and not (fp16 and device.type == "cuda"):
++                sig = sig.float()
++
++            if fp16 and device.type == "cuda":
++                sig = sig.to(dtype=torch.float16)
++                with torch.autocast(device_type="cuda", dtype=torch.float16):
++                    logits = model(nz(sig), seq_ids, nz(stats))["logits"]
++            else:
++                sig = sig.float()
++                logits = model(nz(sig), seq_ids, nz(stats))["logits"]
++
++            out_probs[st:ed] = F.softmax(logits.float(), dim=-1)[:, 1].cpu().numpy()
++            del seq_ids, sig, stats, logits
++    return out_probs
++
++
++def main():
++    parser = argparse.ArgumentParser(description="Fast MethyNano inference (shared-memory + numba kernel)")
++    parser.add_argument("--pod5", required=True, nargs="+", help="One or more POD5 files or directories.")
++    parser.add_argument("--bam", required=True, help="Coordinate-sorted BAM path.")
++    parser.add_argument("--reference", required=True, help="Reference FASTA path.")
++    parser.add_argument("--ckpt", required=True, help="MethyNano checkpoint path.")
++    parser.add_argument("--output", required=True, help="Final predictions CSV path.")
++    parser.add_argument("--recursive", action="store_true", help="Recursively search POD5 under input directories.")
++    parser.add_argument("--clip", type=int, default=6)
++    parser.add_argument("--motif", default=_DEFAULT_MOTIF)
++    parser.add_argument("--min-read-bases", type=int, default=500)
++    parser.add_argument("--require-query-ref-match", action="store_true")
++    parser.add_argument("--threshold", type=float, default=0.5)
++    parser.add_argument("--device", default="auto")
++    parser.add_argument("--fp16", action="store_true")
++    parser.add_argument("--sig-scalar-mode", default="none", choices=["none", "first", "center", "mean"])
++    parser.add_argument("--workers", type=int, default=4)
++    parser.add_argument("--feature-batch-size", type=int, default=512)
++    parser.add_argument("--gpu-batch-size", type=int, default=2048)
++    parser.add_argument("--producer-chunk-size", type=int, default=32)
++    parser.add_argument("--read-queue-size", type=int, default=2)
++    parser.add_argument("--feature-queue-size", type=int, default=1)
++    parser.add_argument("--write-buffer-rows", type=int, default=8192)
++    parser.add_argument("--signal-dtype", default="float16", choices=["float16", "float32"])
++    parser.add_argument("--shm-slots", type=int, default=6)
++    parser.add_argument("--sites", default=None, help="[predict_aln] chrom<TAB>pos0 file; only call these reference positions.")
++    parser.add_argument("--forward-only", action="store_true", help="[predict_aln] skip reverse-strand reads.")
++    args = parser.parse_args()
++
++    if not os.path.exists(args.bam):
++        raise FileNotFoundError(f"BAM not found: {args.bam}")
++    if not os.path.exists(args.bam + ".bai"):
++        raise FileNotFoundError(f"BAM index (.bai) not found: {args.bam}.bai")
++    if not os.path.exists(args.reference):
++        raise FileNotFoundError(f"Reference FASTA not found: {args.reference}")
++    if not os.path.exists(args.ckpt):
++        raise FileNotFoundError(f"Checkpoint not found: {args.ckpt}")
++
++    out_dir = os.path.dirname(os.path.abspath(args.output))
++    if out_dir:
++        os.makedirs(out_dir, exist_ok=True)
++
++    pod5_files = discover_pod5_files(args.pod5, recursive=args.recursive)
++    if not pod5_files:
++        raise FileNotFoundError("No POD5 files found.")
++
++    print(f"[pod5] found {len(pod5_files)} pod5 file(s)")
++    print("[bam] loading usable alignments into memory ...")
++    bam_dict = load_bam_records(args.bam, forward_only=args.forward_only)
++    sites = None
++    if args.sites:
++        sites = {}
++        with open(args.sites) as sf:
++            for line in sf:
++                f = line.split("\t")
++                if len(f) >= 2:
++                    sites.setdefault(f[0], set()).add(int(f[1]))
++        print(f"[sites] {sum(len(v) for v in sites.values())} sites on {len(sites)} contig(s)")
++    print(f"[bam] loaded {len(bam_dict)} usable BAM records.")
++    print("[ref] loading reference into memory ...")
++    ref_dict = load_reference_dict(args.reference)
++    print(f"[ref] loaded {len(ref_dict)} contig(s)")
++
++    if NUMBA_AVAILABLE:
++        print("[numba] warming up compiled feature kernel ...")
++        warmup_numba()
++
++    requested_workers = max(1, int(args.workers))
++    print(f"[workers] using {requested_workers} read-processing worker(s)")
++
++    if sys.platform != "win32" and "fork" in mp.get_all_start_methods():
++        ctx = mp.get_context("fork")
++    else:
++        ctx = mp.get_context("spawn")
++
++    read_queue = ctx.Queue(maxsize=max(1, int(args.read_queue_size)))
++    feature_queue = ctx.Queue(maxsize=max(1, int(args.feature_queue_size)))
++    free_slot_queue = ctx.Queue(maxsize=max(1, int(args.shm_slots)))
++
++    store = SharedFeatureStore(num_slots=max(1, int(args.shm_slots)), batch_size=max(1, int(args.feature_batch_size)), signal_dtype=args.signal_dtype, create=True)
++    store.create_segments()
++    shm_names = store.names()
++    seq_slots, sig_slots, stats_slots, pos_slots = store.arrays()
++
++    for slot_id in range(store.num_slots):
++        free_slot_queue.put(slot_id)
++
++    producer = ctx.Process(target=producer_reads, args=(args.pod5, args.recursive, requested_workers, read_queue, feature_queue, max(1, int(args.producer_chunk_size))))
++    workers: List[mp.Process] = []
++    for worker_id in range(requested_workers):
++        p = ctx.Process(target=feature_worker, args=(
++            worker_id, read_queue, feature_queue, free_slot_queue, shm_names, store.num_slots,
++            bam_dict, ref_dict, args.clip, args.motif, args.min_read_bases, args.require_query_ref_match,
++            args.sig_scalar_mode, max(1, int(args.feature_batch_size)), args.signal_dtype, sites,
++        ))
++        workers.append(p)
++
++    producer.start()
++    for p in workers:
++        p.start()
++
++    device = resolve_device(args.device)
++    print(f"[device] using {device}")
++    model = build_model(args.ckpt, device)
++
++    total_predictions = 0
++    row_idx = 0
++    done_workers = 0
++    producer_done = False
++    producer_stats = None
++    worker_stats = {}
++    write_rows: List[List[object]] = []
++
++    def infer_and_write_slot(meta, writer):
++        nonlocal write_rows, row_idx, total_predictions
++        slot_id = meta["slot_id"]
++        count = meta["count"]
++        probs = infer_batch_chunked(model=model, device=device, fp16=args.fp16,
++                                    seq_arr=seq_slots[slot_id, :count], sig_arr=sig_slots[slot_id, :count],
++                                    stats_arr=stats_slots[slot_id, :count], gpu_batch_size=max(1, int(args.gpu_batch_size)))
++
++        for read_id, pos1, k_mer, prob in zip(meta["read_ids"], pos_slots[slot_id, :count], meta["kmers"], probs):
++            pred = 1 if float(prob) >= args.threshold else 0
++            rec = bam_dict[read_id]
++            write_rows.append([row_idx, read_id, rec["ref_name"], "-" if rec["is_reverse"] else "+",
++                               int(pos1), k_mer, f"{float(prob):.6f}", pred])
++            row_idx += 1
++            total_predictions += 1
++
++        if len(write_rows) >= args.write_buffer_rows:
++            writer.writerows(write_rows)
++            write_rows.clear()
++
++        free_slot_queue.put(slot_id)
++
++    try:
++        with open(args.output, "w", encoding="utf-8", newline="", buffering=1024 * 1024) as out_f:
++            writer = csv.writer(out_f)
++            writer.writerow(["row_idx", "read_id", "chrom", "strand", "pos0", "k_mer", "prob_pos", "label_pred"])
++            pbar = tqdm(total=requested_workers, desc="Workers finished", dynamic_ncols=True)
++
++            try:
++                while done_workers < requested_workers:
++                    msg_type, payload = feature_queue.get()
++                    if msg_type == "data_shm":
++                        infer_and_write_slot(payload, writer)
++                    elif msg_type == "done":
++                        done_workers += 1
++                        worker_stats[payload["worker_id"]] = payload
++                        pbar.update(1)
++                    elif msg_type == "producer_done":
++                        producer_done = True
++                        producer_stats = payload
++                    elif msg_type == "producer_error":
++                        tb = payload["traceback"]
++                        if producer.is_alive():
++                            producer.terminate()
++                        for p in workers:
++                            if p.is_alive():
++                                p.terminate()
++                        producer.join()
++                        for p in workers:
++                            p.join()
++                        raise RuntimeError(f"Producer failed:\n{tb}")
++                    elif msg_type == "error":
++                        worker_id = payload["worker_id"]
++                        tb = payload["traceback"]
++                        if producer.is_alive():
++                            producer.terminate()
++                        for p in workers:
++                            if p.is_alive():
++                                p.terminate()
++                        producer.join()
++                        for p in workers:
++                            p.join()
++                        raise RuntimeError(f"Worker {worker_id} failed:\n{tb}")
++                pbar.close()
++            finally:
++                if write_rows:
++                    writer.writerows(write_rows)
++                    write_rows.clear()
++                producer.join()
++                for p in workers:
++                    p.join()
++    finally:
++        store.close()
++        store.unlink()
++
++    total_usable_reads = 0
++    total_skipped_reads = 0
++    total_emitted_samples = 0
++    for wid in sorted(worker_stats):
++        st = worker_stats[wid]
++        total_usable_reads += st["usable_reads"]
++        total_skipped_reads += st["skipped_reads"]
++        total_emitted_samples += st["emitted_samples"]
++
++    if producer_done and producer_stats is not None:
++        print(f"[producer] pod5_files={producer_stats['pod5_files']}, reads_seen={producer_stats['total_reads_seen']}")
++    print(f"[stream] usable_reads={total_usable_reads}, skipped_reads={total_skipped_reads}, emitted_samples={total_emitted_samples}")
++    print(f"[OK] total_predictions={total_predictions}, output={os.path.abspath(args.output)}")
++    print("No intermediate TSV/CSV files were written.")
++
++
++if __name__ == "__main__":
++    main()

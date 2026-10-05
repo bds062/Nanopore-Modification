@@ -1,0 +1,27 @@
+# RawMod checkpoints benchmarked as columns (bench.models). The entry named rawmod is the released model, scored in
+# every table (md5 6aa9a1afe3c810442067926e303c0013). The r90_logo_* entries are the leave-out models of the
+# supplementary leave-out table: trained with the same configuration as rawmod (scripts/train/run_matched_loco.py,
+# --fold logo_<group>) but without any sample of the group named in the comment. Add a checkpoint with:
+#   rawmod_bench.py rawmod --checkpoint PATH --name NAME
+#name	checkpoint	mask_bases	legacy_ch9	marks
+rawmod	checkpoints/rawmod_final/mixed.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without E. coli (all three libraries)
+r90_logo_ecoli	checkpoints/rawmod_leaveout/ecoli.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without Anabaena
+r90_logo_anabaena	checkpoints/rawmod_leaveout/anabaena.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without H. pylori 26695 (native and WGA)
+r90_logo_hp26695	checkpoints/rawmod_leaveout/hp26695.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without A. thaliana
+r90_logo_plant	checkpoints/rawmod_leaveout/plant.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without HG001 and HG002
+r90_logo_mammal	checkpoints/rawmod_leaveout/mammal.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without 5mC oligonucleotides and their control
+r90_logo_ont5mC	checkpoints/rawmod_leaveout/ont5mC.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without 5hmC oligonucleotides and their control
+r90_logo_ont5hmC	checkpoints/rawmod_leaveout/ont5hmC.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without 6mA oligonucleotides and their control
+r90_logo_ont6mA	checkpoints/rawmod_leaveout/ont6mA.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without SPO1 (all barcodes)
+r90_logo_spo1	checkpoints/rawmod_leaveout/spo1.pt	0	0	5mC,5hmC,6mA,4mC,5hmU
+# without H. pylori J99 and T. denticola
+r90_logo_j99tden	checkpoints/rawmod_leaveout/j99tden.pt	0	0	5mC,5hmC,6mA,4mC,5hmU

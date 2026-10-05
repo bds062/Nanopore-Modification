@@ -1,0 +1,3 @@
+built by bench.bisulfite_rows from Arabidopsis_bisulfite_20x.tsv (ontbasemod)
+context noncpg; coverage >= 20; positive frac >= 0.9; negative frac <= 0.1; both strands; restricted to arabidopsis_chr1 scorable span (K=10, seed=0, min_qs=10)
+205 positives, 676,274 negatives, 31,406 intermediate dropped; reference base C/G at 100.0% of labelled positions
